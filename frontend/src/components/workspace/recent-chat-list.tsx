@@ -4,8 +4,10 @@ import {
   Download,
   FileJson,
   FileText,
+  FolderIcon,
   MoreHorizontal,
   Pencil,
+  Plus,
   Share2,
   Trash2,
 } from "lucide-react";
@@ -15,13 +17,6 @@ import { useCallback, useState } from "react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
-import {
-  Dialog,
-  DialogContent,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -54,7 +49,12 @@ import {
   useThreads,
 } from "@/core/threads/hooks";
 import type { AgentThread, AgentThreadState } from "@/core/threads/types";
-import { pathOfThread, titleOfThread } from "@/core/threads/utils";
+import {
+  pathOfThread,
+  titleOfThread,
+  workspaceMetadataOfThread,
+  workspaceLabelOfThread,
+} from "@/core/threads/utils";
 import { env } from "@/env";
 import { isIMEComposing } from "@/lib/ime";
 
@@ -67,8 +67,6 @@ export function RecentChatList() {
   const { mutate: deleteThread } = useDeleteThread();
   const { mutate: renameThread } = useRenameThread();
 
-  // Rename dialog state
-  const [renameDialogOpen, setRenameDialogOpen] = useState(false);
   const [renameThreadId, setRenameThreadId] = useState<string | null>(null);
   const [renameValue, setRenameValue] = useState("");
 
@@ -95,7 +93,6 @@ export function RecentChatList() {
     (threadId: string, currentTitle: string) => {
       setRenameThreadId(threadId);
       setRenameValue(currentTitle);
-      setRenameDialogOpen(true);
     },
     [],
   );
@@ -103,11 +100,20 @@ export function RecentChatList() {
   const handleRenameSubmit = useCallback(() => {
     if (renameThreadId && renameValue.trim()) {
       renameThread({ threadId: renameThreadId, title: renameValue.trim() });
-      setRenameDialogOpen(false);
-      setRenameThreadId(null);
-      setRenameValue("");
     }
+    setRenameThreadId(null);
+    setRenameValue("");
   }, [renameThread, renameThreadId, renameValue]);
+
+  const handleRenameCancel = useCallback(() => {
+    setRenameThreadId(null);
+    setRenameValue("");
+  }, []);
+
+  const isInlineEditing = useCallback(
+    (threadId: string) => renameThreadId === threadId,
+    [renameThreadId],
+  );
 
   const handleShare = useCallback(
     async (threadId: string) => {
@@ -157,6 +163,36 @@ export function RecentChatList() {
   if (threads.length === 0) {
     return null;
   }
+
+  const groupedThreads = threads.reduce<
+    Record<
+      string,
+      {
+        label: string;
+        workspacePath?: string;
+        items: AgentThread[];
+      }
+    >
+  >((groups, thread) => {
+    const metadata = workspaceMetadataOfThread(thread);
+    const label = workspaceLabelOfThread(thread);
+    const groupKey = metadata.workspace_path
+      ? `${label}::${metadata.workspace_path}`
+      : label;
+    const group =
+      groups[groupKey] ??
+      (groups[groupKey] = {
+        label,
+        workspacePath: metadata.workspace_path,
+        items: [],
+      });
+    group.items.push(thread);
+    return groups;
+  }, {});
+  const groupedEntries = Object.entries(groupedThreads).sort(([, a], [, b]) =>
+    a.label.localeCompare(b.label, "zh-CN"),
+  );
+
   return (
     <>
       <SidebarGroup>
@@ -167,129 +203,169 @@ export function RecentChatList() {
         </SidebarGroupLabel>
         <SidebarGroupContent className="group-data-[collapsible=icon]:pointer-events-none group-data-[collapsible=icon]:-mt-8 group-data-[collapsible=icon]:opacity-0">
           <SidebarMenu>
-            <div className="flex w-full flex-col gap-1">
-              {threads.map((thread) => {
-                const isActive = pathOfThread(thread.thread_id) === pathname;
-                return (
-                  <SidebarMenuItem
-                    key={thread.thread_id}
-                    className="group/side-menu-item"
-                  >
-                    <SidebarMenuButton isActive={isActive} asChild>
-                      <div>
+            <div className="flex w-full flex-col gap-3">
+              {groupedEntries.map(([groupKey, group]) => (
+                <div key={groupKey} className="flex flex-col gap-1.5">
+                  <div className="text-foreground/85 flex items-center justify-between gap-2 px-2 text-xs font-semibold tracking-wide">
+                    <div className="flex min-w-0 items-center gap-2">
+                      <FolderIcon className="size-3.5" />
+                      <span className="truncate">{group.label}</span>
+                    </div>
+                    {group.workspacePath ? (
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        className="text-muted-foreground hover:text-foreground size-6 rounded-md"
+                        asChild
+                      >
                         <Link
-                          className="text-muted-foreground block w-full whitespace-nowrap group-hover/side-menu-item:overflow-hidden"
-                          href={pathOfThread(thread.thread_id)}
+                          href={`/workspace/chats/new?workspace=${encodeURIComponent(group.workspacePath)}`}
+                          title={`在 ${group.label} 下新建对话`}
                         >
-                          {titleOfThread(thread)}
+                          <Plus className="size-3.5" />
                         </Link>
-                        {env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY !== "true" && (
-                          <DropdownMenu>
-                            <DropdownMenuTrigger asChild>
-                              <SidebarMenuAction
-                                showOnHover
-                                className="bg-background/50 hover:bg-background"
+                      </Button>
+                    ) : null}
+                  </div>
+                  <div className="border-border/50 ml-3 flex flex-col gap-1 border-l pl-3">
+                    {group.items.map((thread) => {
+                      const isActive = pathOfThread(thread.thread_id) === pathname;
+                      const isEditing = isInlineEditing(thread.thread_id);
+                      const currentTitle = titleOfThread(thread);
+                      return (
+                        <SidebarMenuItem
+                          key={thread.thread_id}
+                          className="group/side-menu-item"
+                        >
+                          <div className="relative flex items-center gap-1">
+                            {isEditing ? (
+                              <div className="min-w-0 flex-1">
+                                <Input
+                                  autoFocus
+                                  value={renameValue}
+                                  onClick={(event) => {
+                                    event.preventDefault();
+                                    event.stopPropagation();
+                                  }}
+                                  onChange={(event) =>
+                                    setRenameValue(event.target.value)
+                                  }
+                                  onBlur={handleRenameSubmit}
+                                  onKeyDown={(event) => {
+                                    if (
+                                      event.key === "Enter" &&
+                                      !isIMEComposing(event)
+                                    ) {
+                                      event.preventDefault();
+                                      handleRenameSubmit();
+                                      return;
+                                    }
+                                    if (event.key === "Escape") {
+                                      event.preventDefault();
+                                      handleRenameCancel();
+                                    }
+                                  }}
+                                  className="bg-background h-8 w-full rounded-lg text-sm"
+                                />
+                              </div>
+                            ) : (
+                              <SidebarMenuButton
+                                isActive={isActive}
+                                asChild
+                                className="min-h-8 flex-1 rounded-lg"
                               >
-                                <MoreHorizontal />
-                                <span className="sr-only">{t.common.more}</span>
-                              </SidebarMenuAction>
-                            </DropdownMenuTrigger>
-                            <DropdownMenuContent
-                              className="w-48 rounded-lg"
-                              side={"right"}
-                              align={"start"}
-                            >
-                              <DropdownMenuItem
-                                onSelect={() =>
-                                  handleRenameClick(
-                                    thread.thread_id,
-                                    titleOfThread(thread),
-                                  )
-                                }
-                              >
-                                <Pencil className="text-muted-foreground" />
-                                <span>{t.common.rename}</span>
-                              </DropdownMenuItem>
-                              <DropdownMenuItem
-                                onSelect={() => handleShare(thread.thread_id)}
-                              >
-                                <Share2 className="text-muted-foreground" />
-                                <span>{t.common.share}</span>
-                              </DropdownMenuItem>
-                              <DropdownMenuSub>
-                                <DropdownMenuSubTrigger>
-                                  <Download className="text-muted-foreground" />
-                                  <span>{t.common.export}</span>
-                                </DropdownMenuSubTrigger>
-                                <DropdownMenuSubContent>
+                                <Link
+                                  className="text-muted-foreground block w-full whitespace-nowrap group-hover/side-menu-item:overflow-hidden"
+                                  href={pathOfThread(thread.thread_id)}
+                                  onDoubleClick={(event) => {
+                                    event.preventDefault();
+                                    event.stopPropagation();
+                                    handleRenameClick(thread.thread_id, currentTitle);
+                                  }}
+                                  title="双击修改标题"
+                                >
+                                  <span className="block truncate">
+                                    {currentTitle}
+                                  </span>
+                                </Link>
+                              </SidebarMenuButton>
+                            )}
+                            {env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY !== "true" && (
+                              <DropdownMenu>
+                                <DropdownMenuTrigger asChild>
+                                  <SidebarMenuAction
+                                    showOnHover
+                                    className="bg-background/50 hover:bg-background"
+                                  >
+                                    <MoreHorizontal />
+                                    <span className="sr-only">{t.common.more}</span>
+                                  </SidebarMenuAction>
+                                </DropdownMenuTrigger>
+                                <DropdownMenuContent
+                                  className="w-48 rounded-lg"
+                                  side={"right"}
+                                  align={"start"}
+                                >
                                   <DropdownMenuItem
                                     onSelect={() =>
-                                      handleExport(thread, "markdown")
+                                      handleRenameClick(
+                                        thread.thread_id,
+                                        currentTitle,
+                                      )
                                     }
                                   >
-                                    <FileText className="text-muted-foreground" />
-                                    <span>{t.common.exportAsMarkdown}</span>
+                                    <Pencil className="text-muted-foreground" />
+                                    <span>{t.common.rename}</span>
                                   </DropdownMenuItem>
                                   <DropdownMenuItem
-                                    onSelect={() =>
-                                      handleExport(thread, "json")
-                                    }
+                                    onSelect={() => handleShare(thread.thread_id)}
                                   >
-                                    <FileJson className="text-muted-foreground" />
-                                    <span>{t.common.exportAsJSON}</span>
+                                    <Share2 className="text-muted-foreground" />
+                                    <span>{t.common.share}</span>
                                   </DropdownMenuItem>
-                                </DropdownMenuSubContent>
-                              </DropdownMenuSub>
-                              <DropdownMenuSeparator />
-                              <DropdownMenuItem
-                                onSelect={() => handleDelete(thread.thread_id)}
-                              >
-                                <Trash2 className="text-muted-foreground" />
-                                <span>{t.common.delete}</span>
-                              </DropdownMenuItem>
-                            </DropdownMenuContent>
-                          </DropdownMenu>
-                        )}
-                      </div>
-                    </SidebarMenuButton>
-                  </SidebarMenuItem>
-                );
-              })}
+                                  <DropdownMenuSub>
+                                    <DropdownMenuSubTrigger>
+                                      <Download className="text-muted-foreground" />
+                                      <span>{t.common.export}</span>
+                                    </DropdownMenuSubTrigger>
+                                    <DropdownMenuSubContent>
+                                      <DropdownMenuItem
+                                        onSelect={() =>
+                                          handleExport(thread, "markdown")
+                                        }
+                                      >
+                                        <FileText className="text-muted-foreground" />
+                                        <span>{t.common.exportAsMarkdown}</span>
+                                      </DropdownMenuItem>
+                                      <DropdownMenuItem
+                                        onSelect={() => handleExport(thread, "json")}
+                                      >
+                                        <FileJson className="text-muted-foreground" />
+                                        <span>{t.common.exportAsJSON}</span>
+                                      </DropdownMenuItem>
+                                    </DropdownMenuSubContent>
+                                  </DropdownMenuSub>
+                                  <DropdownMenuSeparator />
+                                  <DropdownMenuItem
+                                    onSelect={() => handleDelete(thread.thread_id)}
+                                  >
+                                    <Trash2 className="text-muted-foreground" />
+                                    <span>{t.common.delete}</span>
+                                  </DropdownMenuItem>
+                                </DropdownMenuContent>
+                              </DropdownMenu>
+                            )}
+                          </div>
+                        </SidebarMenuItem>
+                      );
+                    })}
+                  </div>
+                </div>
+              ))}
             </div>
           </SidebarMenu>
         </SidebarGroupContent>
       </SidebarGroup>
-
-      {/* Rename Dialog */}
-      <Dialog open={renameDialogOpen} onOpenChange={setRenameDialogOpen}>
-        <DialogContent className="sm:max-w-[425px]">
-          <DialogHeader>
-            <DialogTitle>{t.common.rename}</DialogTitle>
-          </DialogHeader>
-          <div className="py-4">
-            <Input
-              value={renameValue}
-              onChange={(e) => setRenameValue(e.target.value)}
-              placeholder={t.common.rename}
-              onKeyDown={(e) => {
-                if (e.key === "Enter" && !isIMEComposing(e)) {
-                  e.preventDefault();
-                  handleRenameSubmit();
-                }
-              }}
-            />
-          </div>
-          <DialogFooter>
-            <Button
-              variant="outline"
-              onClick={() => setRenameDialogOpen(false)}
-            >
-              {t.common.cancel}
-            </Button>
-            <Button onClick={handleRenameSubmit}>{t.common.save}</Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
     </>
   );
 }

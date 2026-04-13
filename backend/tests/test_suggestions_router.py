@@ -100,3 +100,18 @@ def test_generate_suggestions_returns_empty_on_model_error(monkeypatch):
     result = asyncio.run(suggestions.generate_suggestions("t1", req))
 
     assert result.suggestions == []
+
+
+def test_generate_suggestions_skips_disabled_deepseek_web_model(monkeypatch):
+    req = suggestions.SuggestionsRequest(
+        messages=[suggestions.SuggestionMessage(role="user", content="Hi")],
+        n=2,
+        model_name="deepseek-web-deerflow",
+    )
+    create_chat_model = MagicMock()
+    monkeypatch.setattr(suggestions, "create_chat_model", create_chat_model)
+
+    result = asyncio.run(suggestions.generate_suggestions("t1", req))
+
+    assert result.suggestions == []
+    create_chat_model.assert_not_called()

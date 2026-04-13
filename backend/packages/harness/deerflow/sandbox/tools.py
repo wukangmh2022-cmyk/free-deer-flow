@@ -1,3 +1,4 @@
+import hashlib
 import posixpath
 import re
 import shlex
@@ -8,7 +9,7 @@ from langgraph.typing import ContextT
 
 from deerflow.agents.thread_state import ThreadDataState, ThreadState
 from deerflow.config import get_app_config
-from deerflow.config.paths import VIRTUAL_PATH_PREFIX
+from deerflow.config.paths import VIRTUAL_PATH_PREFIX, get_paths
 from deerflow.sandbox.exceptions import (
     SandboxError,
     SandboxNotFoundError,
@@ -19,6 +20,7 @@ from deerflow.sandbox.sandbox import Sandbox
 from deerflow.sandbox.sandbox_provider import get_sandbox_provider
 from deerflow.sandbox.search import GrepMatch
 from deerflow.sandbox.security import LOCAL_HOST_BASH_DISABLED_MESSAGE, is_host_bash_allowed
+from deerflow.utils.file_conversion import CONVERTIBLE_EXTENSIONS, _do_convert, _get_pdf_converter
 
 _ABSOLUTE_PATH_PATTERN = re.compile(r"(?<![:\w])(?<!:/)/(?:[^\s\"'`;&|<>()]+)")
 _FILE_URL_PATTERN = re.compile(r"\bfile://\S+", re.IGNORECASE)
@@ -167,6 +169,26 @@ def _get_custom_mount_for_path(path: str):
     return best
 
 
+def _resolve_custom_mount_path(path: str) -> str:
+    """Resolve a configured custom mount path to a host filesystem path."""
+    _reject_path_traversal(path)
+    mount = _get_custom_mount_for_path(path)
+    if mount is None:
+        raise FileNotFoundError(f"Custom mount path not available: {path}")
+
+    host_root = Path(mount.host_path).expanduser().resolve()
+    if path == mount.container_path:
+        return str(host_root)
+
+    relative = path[len(mount.container_path) :].lstrip("/")
+    resolved = (host_root / relative).resolve()
+    try:
+        resolved.relative_to(host_root)
+    except ValueError as exc:
+        raise PermissionError("Access denied: path traversal detected") from exc
+    return str(resolved)
+
+
 def _extract_thread_id_from_thread_data(thread_data: "ThreadDataState | None") -> str | None:
     """Extract thread_id from thread_data by inspecting workspace_path.
 
@@ -184,6 +206,67 @@ def _extract_thread_id_from_thread_data(thread_data: "ThreadDataState | None") -
         return Path(workspace_path).parent.parent.name
     except Exception:
         return None
+
+
+def _get_runtime_thread_id(runtime: ToolRuntime[ContextT, ThreadState] | None) -> str | None:
+    """Resolve thread_id from runtime context/config."""
+    if runtime is None:
+        return None
+    thread_id = runtime.context.get("thread_id") if runtime.context else None
+    if thread_id is None:
+        thread_id = runtime.config.get("configurable", {}).get("thread_id") if runtime.config else None
+    return thread_id if isinstance(thread_id, str) and thread_id.strip() else None
+
+
+def _resolve_host_path_for_document(path: str, thread_data: ThreadDataState | None, thread_id: str | None) -> Path | None:
+    """Resolve a readable host path for a user-visible document path."""
+    if _is_skills_path(path):
+        return Path(_resolve_skills_path(path))
+    if _is_acp_workspace_path(path):
+        return Path(_resolve_acp_workspace_path(path, thread_id))
+    if _is_custom_mount_path(path):
+        return Path(_resolve_custom_mount_path(path))
+    if thread_data is not None and path.startswith(f"{VIRTUAL_PATH_PREFIX}/"):
+        return Path(_resolve_and_validate_user_data_path(path, thread_data))
+    return None
+
+
+def _maybe_read_convertible_document(
+    runtime: ToolRuntime[ContextT, ThreadState],
+    requested_path: str,
+    thread_data: ThreadDataState | None,
+) -> str | None:
+    """Extract readable markdown text for supported document formats."""
+    if Path(requested_path).suffix.lower() not in CONVERTIBLE_EXTENSIONS:
+        return None
+
+    thread_id = _get_runtime_thread_id(runtime)
+    host_path = _resolve_host_path_for_document(requested_path, thread_data, thread_id)
+    if host_path is None:
+        return None
+    if not host_path.is_file():
+        raise FileNotFoundError(requested_path)
+
+    sidecar_markdown = host_path.with_suffix(".md")
+    if sidecar_markdown.is_file():
+        return sidecar_markdown.read_text(encoding="utf-8")
+
+    cache_path: Path | None = None
+    if thread_id is not None:
+        stat = host_path.stat()
+        fingerprint = hashlib.sha256(
+            f"{host_path.resolve()}::{stat.st_mtime_ns}::{stat.st_size}".encode("utf-8")
+        ).hexdigest()[:16]
+        cache_dir = get_paths().sandbox_work_dir(thread_id) / ".converted-documents"
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        cache_path = cache_dir / f"{host_path.stem}-{fingerprint}.md"
+        if cache_path.is_file():
+            return cache_path.read_text(encoding="utf-8")
+
+    text = _do_convert(host_path, _get_pdf_converter())
+    if cache_path is not None:
+        cache_path.write_text(text, encoding="utf-8")
+    return text
 
 
 def _get_acp_workspace_host_path(thread_id: str | None = None) -> str | None:
@@ -851,9 +934,7 @@ def ensure_sandbox_initialized(runtime: ToolRuntime[ContextT, ThreadState] | Non
             # Sandbox was released, fall through to acquire new one
 
     # Lazy acquisition: get thread_id and acquire sandbox
-    thread_id = runtime.context.get("thread_id") if runtime.context else None
-    if thread_id is None:
-        thread_id = runtime.config.get("configurable", {}).get("thread_id") if runtime.config else None
+    thread_id = _get_runtime_thread_id(runtime)
     if thread_id is None:
         raise SandboxRuntimeError("Thread ID not available in runtime context")
 
@@ -1037,7 +1118,7 @@ def bash_tool(runtime: ToolRuntime[ContextT, ThreadState], description: str, com
 
 @tool("ls", parse_docstring=True)
 def ls_tool(runtime: ToolRuntime[ContextT, ThreadState], description: str, path: str) -> str:
-    """List the contents of a directory up to 2 levels deep in tree format.
+    """List the contents of a directory up to 4 levels deep in tree format.
 
     Args:
         description: Explain why you are listing this directory in short words. ALWAYS PROVIDE THIS PARAMETER FIRST.
@@ -1057,7 +1138,7 @@ def ls_tool(runtime: ToolRuntime[ContextT, ThreadState], description: str, path:
             elif not _is_custom_mount_path(path):
                 path = _resolve_and_validate_user_data_path(path, thread_data)
             # Custom mount paths are resolved by LocalSandbox._resolve_path()
-        children = sandbox.list_dir(path)
+        children = sandbox.list_dir(path, max_depth=4)
         if not children:
             return "(empty)"
         output = "\n".join(children)
@@ -1219,17 +1300,26 @@ def read_file_tool(
         sandbox = ensure_sandbox_initialized(runtime)
         ensure_thread_directories_exist(runtime)
         requested_path = path
-        if is_local_sandbox(runtime):
-            thread_data = get_thread_data(runtime)
-            validate_local_tool_path(path, thread_data, read_only=True)
-            if _is_skills_path(path):
-                path = _resolve_skills_path(path)
-            elif _is_acp_workspace_path(path):
-                path = _resolve_acp_workspace_path(path, _extract_thread_id_from_thread_data(thread_data))
-            elif not _is_custom_mount_path(path):
-                path = _resolve_and_validate_user_data_path(path, thread_data)
-            # Custom mount paths are resolved by LocalSandbox._resolve_path()
-        content = sandbox.read_file(path)
+        thread_data = get_thread_data(runtime)
+        if thread_data is not None:
+            validate_local_tool_path(requested_path, thread_data, read_only=True)
+
+        document_content = _maybe_read_convertible_document(runtime, requested_path, thread_data)
+        if document_content is not None:
+            content = document_content
+        else:
+            if is_local_sandbox(runtime):
+                if thread_data is None:
+                    raise SandboxRuntimeError("Thread data not available for local sandbox")
+                if _is_skills_path(path):
+                    path = _resolve_skills_path(path)
+                elif _is_acp_workspace_path(path):
+                    path = _resolve_acp_workspace_path(path, _get_runtime_thread_id(runtime))
+                elif _is_custom_mount_path(path):
+                    path = _resolve_custom_mount_path(path)
+                else:
+                    path = _resolve_and_validate_user_data_path(path, thread_data)
+            content = sandbox.read_file(path)
         if not content:
             return "(empty)"
         if start_line is not None and end_line is not None:

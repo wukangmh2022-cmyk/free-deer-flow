@@ -478,18 +478,24 @@ async def get_thread(thread_id: str, request: Request) -> ThreadResponse:
 
     # If the thread exists in the checkpointer but not the store (e.g. legacy
     # data), synthesize a minimal store record from the checkpoint metadata.
+    ckpt_meta = getattr(checkpoint_tuple, "metadata", {}) or {} if checkpoint_tuple is not None else {}
+    ckpt_user_meta = {k: v for k, v in ckpt_meta.items() if k not in ("created_at", "updated_at", "step", "source", "writes", "parents")}
     if record is None and checkpoint_tuple is not None:
-        ckpt_meta = getattr(checkpoint_tuple, "metadata", {}) or {}
         record = {
             "thread_id": thread_id,
             "status": "idle",
             "created_at": ckpt_meta.get("created_at", ""),
             "updated_at": ckpt_meta.get("updated_at", ckpt_meta.get("created_at", "")),
-            "metadata": {k: v for k, v in ckpt_meta.items() if k not in ("created_at", "updated_at", "step", "source", "writes", "parents")},
+            "metadata": ckpt_user_meta,
         }
 
     if record is None:
         raise HTTPException(status_code=404, detail=f"Thread {thread_id} not found")
+
+    if ckpt_user_meta:
+        merged_metadata = dict(ckpt_user_meta)
+        merged_metadata.update(record.get("metadata", {}))
+        record["metadata"] = merged_metadata
 
     status = _derive_thread_status(checkpoint_tuple) if checkpoint_tuple is not None else record.get("status", "idle")
     checkpoint = getattr(checkpoint_tuple, "checkpoint", {}) or {} if checkpoint_tuple is not None else {}

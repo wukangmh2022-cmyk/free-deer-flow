@@ -37,7 +37,41 @@ import { useArtifacts } from "../artifacts";
 import { FlipDisplay } from "../flip-display";
 import { Tooltip } from "../tooltip";
 
+import { useThread } from "./context";
+import { mapSandboxTextToWorkspace } from "./path-display";
 import { MarkdownContent } from "./markdown-content";
+
+function renderToolResultPreview(
+  result: string | Record<string, unknown> | undefined,
+  workspaceTargetPath?: string | null,
+  workspaceContainerPath?: string | null,
+) {
+  if (result == null) {
+    return null;
+  }
+
+  const text =
+    typeof result === "string"
+      ? result.trim()
+      : JSON.stringify(result, null, 2).trim();
+  if (!text) {
+    return null;
+  }
+
+  const displayText = mapSandboxTextToWorkspace(
+    text,
+    workspaceTargetPath,
+    workspaceContainerPath,
+  );
+  const lines = displayText.split("\n");
+  const preview = lines.slice(0, 5).join("\n");
+  const suffix = lines.length > 5 ? "\n..." : "";
+  return (
+    <pre className="bg-muted/40 mt-2 overflow-x-auto rounded-md border px-3 py-2 font-mono text-xs whitespace-pre-wrap">
+      {`${preview}${suffix}`}
+    </pre>
+  );
+}
 
 export function MessageGroup({
   className,
@@ -201,8 +235,11 @@ function ToolCall({
   isLoading?: boolean;
 }) {
   const { t } = useI18n();
+  const { workspaceTargetPath, workspaceContainerPath } = useThread();
   const { setOpen, autoOpen, autoSelect, selectedArtifact, select } =
     useArtifacts();
+  const mapDisplayText = (value: string) =>
+    mapSandboxTextToWorkspace(value, workspaceTargetPath, workspaceContainerPath);
 
   if (name === "web_search") {
     let label: React.ReactNode = t.toolCalls.searchForRelatedInfo;
@@ -305,10 +342,14 @@ function ToolCall({
     }
     const path: string | undefined = (args as { path: string })?.path;
     return (
-      <ChainOfThoughtStep key={id} label={description} icon={FolderOpenIcon}>
+      <ChainOfThoughtStep
+        key={id}
+        label={mapDisplayText(description)}
+        icon={FolderOpenIcon}
+      >
         {path && (
           <ChainOfThoughtSearchResult className="cursor-pointer">
-            {path}
+            {mapDisplayText(path)}
           </ChainOfThoughtSearchResult>
         )}
       </ChainOfThoughtStep>
@@ -321,10 +362,14 @@ function ToolCall({
     }
     const { path } = args as { path: string; content: string };
     return (
-      <ChainOfThoughtStep key={id} label={description} icon={BookOpenTextIcon}>
+      <ChainOfThoughtStep
+        key={id}
+        label={mapDisplayText(description)}
+        icon={BookOpenTextIcon}
+      >
         {path && (
           <ChainOfThoughtSearchResult className="cursor-pointer">
-            {path}
+            {mapDisplayText(path)}
           </ChainOfThoughtSearchResult>
         )}
       </ChainOfThoughtStep>
@@ -353,7 +398,7 @@ function ToolCall({
       <ChainOfThoughtStep
         key={id}
         className="cursor-pointer"
-        label={description}
+        label={mapDisplayText(description)}
         icon={NotebookPenIcon}
         onClick={() => {
           select(
@@ -366,7 +411,7 @@ function ToolCall({
       >
         {path && (
           <ChainOfThoughtSearchResult className="cursor-pointer">
-            {path}
+            {mapDisplayText(path)}
           </ChainOfThoughtSearchResult>
         )}
       </ChainOfThoughtStep>
@@ -381,7 +426,7 @@ function ToolCall({
     return (
       <ChainOfThoughtStep
         key={id}
-        label={description}
+        label={mapDisplayText(description)}
         icon={SquareTerminalIcon}
       >
         {command && (
@@ -389,8 +434,13 @@ function ToolCall({
             className="mx-0 cursor-pointer border-none px-0"
             showLineNumbers={false}
             language="bash"
-            code={command}
+            code={mapDisplayText(command)}
           />
+        )}
+        {renderToolResultPreview(
+          result,
+          workspaceTargetPath,
+          workspaceContainerPath,
         )}
       </ChainOfThoughtStep>
     );
@@ -416,9 +466,15 @@ function ToolCall({
     return (
       <ChainOfThoughtStep
         key={id}
-        label={description ?? t.toolCalls.useTool(name)}
+        label={description ? mapDisplayText(description) : t.toolCalls.useTool(name)}
         icon={WrenchIcon}
-      ></ChainOfThoughtStep>
+      >
+        {renderToolResultPreview(
+          result,
+          workspaceTargetPath,
+          workspaceContainerPath,
+        )}
+      </ChainOfThoughtStep>
     );
   }
 }

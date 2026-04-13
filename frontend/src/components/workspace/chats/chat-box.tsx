@@ -16,6 +16,7 @@ import { cn } from "@/lib/utils";
 import {
   ArtifactFileDetail,
   ArtifactFileList,
+  ThreadFileBrowser,
   useArtifacts,
 } from "../artifacts";
 import { useThread } from "../messages/context";
@@ -23,9 +24,14 @@ import { useThread } from "../messages/context";
 const CLOSE_MODE = { chat: 100, artifacts: 0 };
 const OPEN_MODE = { chat: 60, artifacts: 40 };
 
-const ChatBox: React.FC<{ children: React.ReactNode; threadId: string }> = ({
+const ChatBox: React.FC<{
+  children: React.ReactNode;
+  threadId: string;
+  workspaceTargetPath?: string | null;
+}> = ({
   children,
   threadId,
+  workspaceTargetPath,
 }) => {
   const { thread } = useThread();
   const pathname = usePathname();
@@ -35,6 +41,7 @@ const ChatBox: React.FC<{ children: React.ReactNode; threadId: string }> = ({
   const {
     artifacts,
     open: artifactsOpen,
+    panelTab,
     setOpen: setArtifactsOpen,
     setArtifacts,
     select: selectArtifact,
@@ -130,7 +137,11 @@ const ChatBox: React.FC<{ children: React.ReactNode; threadId: string }> = ({
             artifactPanelOpen ? "translate-x-0" : "translate-x-full",
           )}
         >
-          {selectedArtifact ? (
+          {panelTab === "files" ? (
+            <ThreadFileBrowser
+              workspaceTargetPath={workspaceTargetPath}
+            />
+          ) : selectedArtifact ? (
             <ArtifactFileDetail
               className="size-full"
               filepath={selectedArtifact}

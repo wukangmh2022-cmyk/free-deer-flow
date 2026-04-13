@@ -30,11 +30,15 @@ export function getLangGraphBaseURL(isMock?: boolean) {
     }
     return "http://localhost:3000/mock/api";
   } else {
-    // LangGraph SDK requires a full URL, construct it from current origin
+    // In local nginx-on-2026 development, use the gateway-backed compat API so
+    // thread creation and stream/history reads share the same backend state.
     if (typeof window !== "undefined") {
+      if (window.location.port === "2026") {
+        return `${window.location.origin}/api/langgraph-compat`;
+      }
       return `${window.location.origin}/api/langgraph`;
     }
-    // Fallback for SSR
-    return "http://localhost:2026/api/langgraph";
+    // Fallback for SSR/local dev
+    return "http://localhost:2026/api/langgraph-compat";
   }
 }

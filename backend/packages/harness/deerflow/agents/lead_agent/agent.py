@@ -14,6 +14,7 @@ from deerflow.agents.middlewares.todo_middleware import TodoMiddleware
 from deerflow.agents.middlewares.token_usage_middleware import TokenUsageMiddleware
 from deerflow.agents.middlewares.tool_error_handling_middleware import build_lead_runtime_middlewares
 from deerflow.agents.middlewares.view_image_middleware import ViewImageMiddleware
+from deerflow.agents.middlewares.workspace_context_middleware import WorkspaceContextMiddleware
 from deerflow.agents.thread_state import ThreadState
 from deerflow.config.agents_config import load_agent_config
 from deerflow.config.app_config import get_app_config
@@ -245,6 +246,10 @@ def _build_middlewares(config: RunnableConfig, model_name: str | None, agent_nam
     model_config = app_config.get_model_config(model_name) if model_name else None
     if model_config is not None and model_config.supports_vision:
         middlewares.append(ViewImageMiddleware())
+
+    # Remind the model which workspace is already bound to this thread so it
+    # defaults to inspecting that directory instead of asking for a path.
+    middlewares.append(WorkspaceContextMiddleware())
 
     # Add DeferredToolFilterMiddleware to hide deferred tool schemas from model binding
     if app_config.tool_search.enabled:

@@ -5,8 +5,6 @@ import {
   SidebarHeader,
   SidebarContent,
   SidebarFooter,
-  SidebarRail,
-  useSidebar,
 } from "@/components/ui/sidebar";
 
 import { RecentChatList } from "./recent-chat-list";
@@ -17,7 +15,6 @@ import { WorkspaceNavMenu } from "./workspace-nav-menu";
 export function WorkspaceSidebar({
   ...props
 }: React.ComponentProps<typeof Sidebar>) {
-  const { open: isSidebarOpen } = useSidebar();
   return (
     <>
       <Sidebar variant="sidebar" collapsible="icon" {...props}>
@@ -26,12 +23,11 @@ export function WorkspaceSidebar({
         </SidebarHeader>
         <SidebarContent>
           <WorkspaceNavChatList />
-          {isSidebarOpen && <RecentChatList />}
+          <RecentChatList />
         </SidebarContent>
         <SidebarFooter>
           <WorkspaceNavMenu />
         </SidebarFooter>
-        <SidebarRail />
       </Sidebar>
     </>
   );

@@ -27,6 +27,7 @@ export type ThreadStreamOptions = {
   threadId?: string | null | undefined;
   context: LocalSettings["context"];
   isMock?: boolean;
+  initialThreadMetadata?: Record<string, unknown>;
   onStart?: (threadId: string) => void;
   onFinish?: (state: AgentThreadState) => void;
   onToolEnd?: (event: ToolEndEvent) => void;
@@ -134,10 +135,106 @@ function getStreamErrorMessage(error: unknown): string {
   return "Request failed.";
 }
 
+async function ensureGatewayThread(
+  threadId: string,
+  metadata: Record<string, unknown>,
+) {
+  const response = await fetch(`${getBackendBaseURL()}/api/threads`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      thread_id: threadId,
+      metadata,
+    }),
+  });
+
+  if (response.ok) {
+    return;
+  }
+
+  const error = await response
+    .json()
+    .catch(() => ({ detail: "Failed to create thread." }));
+
+  const detail =
+    typeof error?.detail === "string"
+      ? error.detail
+      : "Failed to create thread.";
+
+  if (
+    response.status === 409 ||
+    detail.includes("already exists") ||
+    detail.includes("already exist")
+  ) {
+    return;
+  }
+
+  throw new Error(detail);
+}
+
+async function fetchGatewayThread(threadId: string): Promise<AgentThread | null> {
+  const response = await fetch(
+    `${getBackendBaseURL()}/api/threads/${encodeURIComponent(threadId)}`,
+  );
+
+  if (!response.ok) {
+    if (response.status === 404) {
+      if (typeof window !== "undefined") {
+        window.sessionStorage.removeItem(`lg:stream:${threadId}`);
+      }
+      return null;
+    }
+    const error = await response
+      .json()
+      .catch(() => ({ detail: "Failed to load thread." }));
+    throw new Error(error.detail ?? "Failed to load thread.");
+  }
+
+  return (await response.json()) as AgentThread;
+}
+
+async function searchGatewayThreads(
+  params: Parameters<ThreadsClient["search"]>[0] | undefined,
+): Promise<AgentThread[]> {
+  const normalizedParams = params ?? {};
+  const response = await fetch(`${getBackendBaseURL()}/api/threads/search`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      limit: normalizedParams.limit ?? 50,
+      offset: normalizedParams.offset ?? 0,
+      status:
+        typeof normalizedParams.status === "string" &&
+        normalizedParams.status.trim()
+          ? normalizedParams.status
+          : undefined,
+      metadata:
+        normalizedParams.metadata &&
+        typeof normalizedParams.metadata === "object"
+          ? normalizedParams.metadata
+          : {},
+    }),
+  });
+
+  if (!response.ok) {
+    const error = await response
+      .json()
+      .catch(() => ({ detail: "Failed to search threads." }));
+    throw new Error(error.detail ?? "Failed to search threads.");
+  }
+
+  return (await response.json()) as AgentThread[];
+}
+
 export function useThreadStream({
   threadId,
   context,
   isMock,
+  initialThreadMetadata,
   onStart,
   onFinish,
   onToolEnd,
@@ -369,10 +466,17 @@ export function useThreadStream({
       }
       setOptimisticMessages(newOptimistic);
 
-      // Only fire onStart immediately for an existing persisted thread.
-      // Brand-new chats should wait for onCreated(meta.thread_id) so URL sync
-      // uses the real server-generated thread id.
-      if (threadIdRef.current) {
+      let activeThreadId = threadId;
+
+      // When starting a brand-new thread, create it first so metadata such as
+      // the chosen workspace is persisted before the first run starts.
+      if (!threadIdRef.current) {
+        await ensureGatewayThread(threadId, initialThreadMetadata ?? {});
+        activeThreadId = threadId;
+        threadIdRef.current = activeThreadId;
+        setOnStreamThreadId(activeThreadId);
+        _handleOnStart(activeThreadId);
+      } else {
         _handleOnStart(threadId);
       }
 
@@ -399,12 +503,12 @@ export function useThreadStream({
               );
             }
 
-            if (!threadId) {
+            if (!activeThreadId) {
               throw new Error("Thread is not ready for file upload.");
             }
 
             if (files.length > 0) {
-              const uploadResponse = await uploadFiles(threadId, files);
+              const uploadResponse = await uploadFiles(activeThreadId, files);
               uploadedFileInfo = uploadResponse.files;
 
               // Update optimistic human message with uploaded status + paths
@@ -474,7 +578,7 @@ export function useThreadStream({
             ],
           },
           {
-            threadId: threadId,
+            threadId: activeThreadId,
             streamSubgraphs: true,
             streamResumable: true,
             config: {
@@ -495,7 +599,7 @@ export function useThreadStream({
                     : context.mode === "thinking"
                       ? "low"
                       : undefined),
-              thread_id: threadId,
+              thread_id: activeThreadId,
             },
           },
         );
@@ -508,7 +612,14 @@ export function useThreadStream({
         sendInFlightRef.current = false;
       }
     },
-    [thread, _handleOnStart, t.uploads.uploadingFiles, context, queryClient],
+    [
+      thread,
+      _handleOnStart,
+      t.uploads.uploadingFiles,
+      context,
+      queryClient,
+      initialThreadMetadata,
+    ],
   );
 
   // Merge thread with optimistic messages for display
@@ -523,6 +634,19 @@ export function useThreadStream({
   return [mergedThread, sendMessage, isUploading] as const;
 }
 
+export function useThreadRecord(threadId?: string | null) {
+  return useQuery({
+    queryKey: ["threads", "get", threadId],
+    enabled: Boolean(threadId),
+    queryFn: async () => {
+      if (!threadId) {
+        return null;
+      }
+      return await fetchGatewayThread(threadId);
+    },
+  });
+}
+
 export function useThreads(
   params: Parameters<ThreadsClient["search"]>[0] = {
     limit: 50,
@@ -531,7 +655,6 @@ export function useThreads(
     select: ["thread_id", "updated_at", "values"],
   },
 ) {
-  const apiClient = getAPIClient();
   return useQuery<AgentThread[]>({
     queryKey: ["threads", "search", params],
     queryFn: async () => {
@@ -542,9 +665,7 @@ export function useThreads(
       // Preserve prior semantics: if a non-positive limit is explicitly provided,
       // delegate to a single search call with the original parameters.
       if (maxResults !== undefined && maxResults <= 0) {
-        const response =
-          await apiClient.threads.search<AgentThreadState>(params);
-        return response as AgentThread[];
+        return await searchGatewayThreads(params);
       }
 
       const pageSize =
@@ -569,11 +690,11 @@ export function useThreads(
           break;
         }
 
-        const response = (await apiClient.threads.search<AgentThreadState>({
+        const response = await searchGatewayThreads({
           ...params,
           limit: currentLimit,
           offset,
-        })) as AgentThread[];
+        });
 
         threads.push(...response);
 
@@ -652,7 +773,10 @@ export function useRenameThread() {
           queryKey: ["threads", "search"],
           exact: false,
         },
-        (oldData: Array<AgentThread>) => {
+        (oldData: Array<AgentThread> | undefined) => {
+          if (!oldData) {
+            return oldData;
+          }
           return oldData.map((t) => {
             if (t.thread_id === threadId) {
               return {
@@ -667,6 +791,29 @@ export function useRenameThread() {
           });
         },
       );
+      queryClient.setQueriesData(
+        {
+          queryKey: ["threads", "get", threadId],
+          exact: false,
+        },
+        (oldData: AgentThread | undefined) => {
+          if (!oldData) {
+            return oldData;
+          }
+          return {
+            ...oldData,
+            values: {
+              ...oldData.values,
+              title,
+            },
+          };
+        },
+      );
+      void queryClient.invalidateQueries({ queryKey: ["threads", "search"] });
+      void queryClient.invalidateQueries({
+        queryKey: ["threads", "get", threadId],
+      });
+      void queryClient.invalidateQueries({ queryKey: ["threads", threadId] });
     },
   });
 }

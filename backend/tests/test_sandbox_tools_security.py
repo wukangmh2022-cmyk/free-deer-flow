@@ -19,6 +19,7 @@ from deerflow.sandbox.tools import (
     _resolve_skills_path,
     bash_tool,
     mask_local_paths_in_output,
+    read_file_tool,
     replace_virtual_path,
     replace_virtual_paths_in_command,
     str_replace_tool,
@@ -265,6 +266,53 @@ def test_resolve_and_validate_user_data_path_blocks_traversal(tmp_path: Path) ->
     # This path resolves outside the allowed roots
     with pytest.raises(PermissionError):
         _resolve_and_validate_user_data_path("/mnt/user-data/workspace/../../../etc/passwd", thread_data)
+
+
+def test_read_file_tool_reads_convertible_workspace_document_via_cached_markdown(tmp_path: Path, monkeypatch) -> None:
+    workspace = tmp_path / "project"
+    workspace.mkdir()
+    pdf_path = workspace / "report.pdf"
+    pdf_path.write_bytes(b"%PDF-pretend")
+
+    runtime = SimpleNamespace(
+        state={
+            "thread_data": {
+                "workspace_path": str(workspace),
+                "workspace_container_path": "/mnt/project",
+                "uploads_path": str(tmp_path / "uploads"),
+                "outputs_path": str(tmp_path / "outputs"),
+            }
+        },
+        context={"thread_id": "thread-123"},
+        config={},
+    )
+
+    class FailingSandbox:
+        def read_file(self, path: str) -> str:
+            raise AssertionError("read_file should use document conversion for PDFs")
+
+    monkeypatch.setattr("deerflow.sandbox.tools.ensure_sandbox_initialized", lambda runtime: FailingSandbox())
+    monkeypatch.setattr("deerflow.sandbox.tools.ensure_thread_directories_exist", lambda runtime: None)
+    monkeypatch.setattr("deerflow.sandbox.tools.is_local_sandbox", lambda runtime: False)
+    monkeypatch.setattr(
+        "deerflow.sandbox.tools._get_custom_mounts",
+        lambda: [SimpleNamespace(host_path=str(workspace), container_path="/mnt/project", read_only=False)],
+    )
+    monkeypatch.setattr(
+        "deerflow.sandbox.tools.get_paths",
+        lambda: SimpleNamespace(sandbox_work_dir=lambda thread_id: tmp_path / "thread-workspace"),
+    )
+    monkeypatch.setattr("deerflow.sandbox.tools._do_convert", lambda file_path, pdf_converter: "# Converted Report\n\nHello PDF")
+    monkeypatch.setattr("deerflow.sandbox.tools._get_pdf_converter", lambda: "auto")
+
+    content = read_file_tool.func(
+        runtime=runtime,
+        description="Read the bound PDF",
+        path="/mnt/project/report.pdf",
+    )
+
+    assert "# Converted Report" in content
+    assert "Hello PDF" in content
 
 
 # ---------- replace_virtual_paths_in_command ----------

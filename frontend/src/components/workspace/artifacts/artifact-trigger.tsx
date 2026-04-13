@@ -8,7 +8,7 @@ import { useArtifacts } from "./context";
 
 export const ArtifactTrigger = () => {
   const { t } = useI18n();
-  const { artifacts, setOpen: setArtifactsOpen } = useArtifacts();
+  const { artifacts, setOpen: setArtifactsOpen, setPanelTab } = useArtifacts();
 
   if (!artifacts || artifacts.length === 0) {
     return null;
@@ -19,6 +19,7 @@ export const ArtifactTrigger = () => {
         className="text-muted-foreground hover:text-foreground"
         variant="ghost"
         onClick={() => {
+          setPanelTab("artifacts");
           setArtifactsOpen(true);
         }}
       >

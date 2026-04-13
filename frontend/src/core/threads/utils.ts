@@ -1,6 +1,6 @@
 import type { Message } from "@langchain/langgraph-sdk";
 
-import type { AgentThread } from "./types";
+import type { AgentThread, ThreadWorkspaceMetadata } from "./types";
 
 export function pathOfThread(threadId: string) {
   return `/workspace/chats/${threadId}`;
@@ -21,4 +21,18 @@ export function textOfMessage(message: Message) {
 
 export function titleOfThread(thread: AgentThread) {
   return thread.values?.title ?? "Untitled";
+}
+
+export function workspaceMetadataOfThread(
+  thread: Pick<AgentThread, "metadata"> | null | undefined,
+): ThreadWorkspaceMetadata {
+  const metadata = (thread?.metadata ?? {}) as ThreadWorkspaceMetadata;
+  return metadata;
+}
+
+export function workspaceLabelOfThread(
+  thread: Pick<AgentThread, "metadata"> | null | undefined,
+) {
+  const metadata = workspaceMetadataOfThread(thread);
+  return metadata.workspace_name ?? "General";
 }

@@ -10,6 +10,11 @@ from deerflow.models import create_chat_model
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api", tags=["suggestions"])
+SUGGESTIONS_DISABLED_MODELS = {
+    "deepseek-web",
+    "deepseek-web-deerflow",
+    "deepseek-web-deerflow-sticky",
+}
 
 
 class SuggestionMessage(BaseModel):
@@ -92,6 +97,12 @@ def _format_conversation(messages: list[SuggestionMessage]) -> str:
     return "\n".join(parts).strip()
 
 
+def _suggestions_enabled_for_model(model_name: str | None) -> bool:
+    if not model_name:
+        return True
+    return model_name not in SUGGESTIONS_DISABLED_MODELS
+
+
 @router.post(
     "/threads/{thread_id}/suggestions",
     response_model=SuggestionsResponse,
@@ -100,6 +111,8 @@ def _format_conversation(messages: list[SuggestionMessage]) -> str:
 )
 async def generate_suggestions(thread_id: str, request: SuggestionsRequest) -> SuggestionsResponse:
     if not request.messages:
+        return SuggestionsResponse(suggestions=[])
+    if not _suggestions_enabled_for_model(request.model_name):
         return SuggestionsResponse(suggestions=[])
 
     n = request.n

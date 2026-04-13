@@ -11,6 +11,13 @@ export interface AgentThreadState extends Record<string, unknown> {
 
 export interface AgentThread extends Thread<AgentThreadState> {}
 
+export interface ThreadWorkspaceMetadata {
+  workspace_id?: string;
+  workspace_name?: string;
+  workspace_path?: string;
+  workspace_container_path?: string;
+}
+
 export interface AgentThreadContext extends Record<string, unknown> {
   thread_id: string;
   model_name: string | undefined;

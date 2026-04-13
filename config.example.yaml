@@ -34,6 +34,21 @@ token_usage:
 # Configure available LLM models for the agent to use
 
 models:
+  # Example: local DeepSeek web gateway (works with DeerFlow, Cherry Studio, etc.)
+  # Start the gateway first:
+  #   cd backend
+  #   uv run uvicorn app.deepseek_local_provider:app --host 127.0.0.1 --port 8765
+  #
+  # Then configure DeerFlow to call it like any OpenAI-compatible endpoint:
+  # - name: deepseek-web-local
+  #   display_name: DeepSeek Web Local
+  #   use: langchain_openai:ChatOpenAI
+  #   model: deepseek-web
+  #   api_key: local-placeholder
+  #   base_url: http://127.0.0.1:8765/v1
+  #   request_timeout: 600.0
+  #   max_retries: 1
+
   # Example: Volcengine (Doubao) model
   # - name: doubao-seed-1.8
   #   display_name: Doubao-Seed-1.8
@@ -424,10 +439,13 @@ sandbox:
   allow_host_bash: false
   # Optional: Mount additional host directories into the sandbox.
   # Each mount maps a host path to a virtual container path accessible by the agent.
+  # For local coding workflows, mount your real project and let the agent edit
+  # that directory directly instead of forcing everything through
+  # /mnt/user-data/outputs.
   # mounts:
   #   - host_path: /home/user/my-project    # Absolute path on the host machine
-  #     container_path: /mnt/my-project     # Virtual path inside the sandbox
-  #     read_only: true                     # Whether the mount is read-only (default: false)
+  #     container_path: /mnt/project        # Simple virtual path inside the sandbox
+  #     read_only: false                    # Set false if you want direct file edits
 
   # Tool output truncation limits (characters).
   # bash uses middle-truncation (head + tail) since errors can appear anywhere in the output.

@@ -2,12 +2,17 @@
 
 import { BotIcon, PlusSquare } from "lucide-react";
 import { useParams, useRouter } from "next/navigation";
-import { useCallback, useState } from "react";
+import { useCallback, useRef, useState } from "react";
+import { useEffect } from "react";
+import { toast } from "sonner";
 
 import type { PromptInputMessage } from "@/components/ai-elements/prompt-input";
 import { Button } from "@/components/ui/button";
 import { AgentWelcome } from "@/components/workspace/agent-welcome";
-import { ArtifactTrigger } from "@/components/workspace/artifacts";
+import {
+  ArtifactTrigger,
+  ThreadFilesTrigger,
+} from "@/components/workspace/artifacts";
 import { ChatBox, useThreadChat } from "@/components/workspace/chats";
 import { ExportTrigger } from "@/components/workspace/export-trigger";
 import { InputBox } from "@/components/workspace/input-box";
@@ -25,8 +30,10 @@ import { useAgent } from "@/core/agents";
 import { useI18n } from "@/core/i18n/hooks";
 import { useNotification } from "@/core/notification/hooks";
 import { useThreadSettings } from "@/core/settings";
-import { useThreadStream } from "@/core/threads/hooks";
+import { mirrorThreadFiles } from "@/core/thread-files/api";
+import { useThreadRecord, useThreadStream } from "@/core/threads/hooks";
 import { textOfMessage } from "@/core/threads/utils";
+import { uuid } from "@/core/utils/uuid";
 import { env } from "@/env";
 import { cn } from "@/lib/utils";
 
@@ -43,11 +50,37 @@ export default function AgentChatPage() {
 
   const { threadId, setThreadId, isNewThread, setIsNewThread } =
     useThreadChat();
+  const threadRecordQuery = useThreadRecord(isNewThread ? undefined : threadId);
+  const threadRecord = threadRecordQuery.data;
+  const resolvedThreadId =
+    isNewThread || !threadRecordQuery.isFetched || threadRecord === null
+      ? undefined
+      : threadId;
   const [settings, setSettings] = useThreadSettings(threadId);
 
+  useEffect(() => {
+    if (isNewThread || !threadRecordQuery.isFetched || threadRecord !== null) {
+      return;
+    }
+
+    setIsNewThread(true);
+    setThreadId(uuid());
+    history.replaceState(null, "", `/workspace/agents/${agent_name}/chats/new`);
+  }, [
+    agent_name,
+    isNewThread,
+    setIsNewThread,
+    setThreadId,
+    threadRecord,
+    threadRecordQuery.isFetched,
+  ]);
+
   const { showNotification } = useNotification();
+  const retryContinueRef = useRef<(() => void) | null>(null);
+  const retriedHumanMessageIdsRef = useRef<Set<string>>(new Set());
+  const outputSyncTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [thread, sendMessage] = useThreadStream({
-    threadId: isNewThread ? undefined : threadId,
+    threadId: resolvedThreadId,
     context: { ...settings.context, agent_name: agent_name },
     onStart: (createdThreadId) => {
       setThreadId(createdThreadId);
@@ -60,9 +93,9 @@ export default function AgentChatPage() {
       );
     },
     onFinish: (state) => {
+      const lastMessage = state.messages[state.messages.length - 1];
       if (document.hidden || !document.hasFocus()) {
         let body = "Conversation finished";
-        const lastMessage = state.messages[state.messages.length - 1];
         if (lastMessage) {
           const textContent = textOfMessage(lastMessage);
           if (textContent) {
@@ -74,8 +107,71 @@ export default function AgentChatPage() {
         }
         showNotification(state.title, { body });
       }
+
+      const lastVisibleHuman = [...state.messages]
+        .reverse()
+        .find(
+          (message) =>
+            message.type === "human" &&
+            message.additional_kwargs?.hide_from_ui !== true,
+        );
+      const lastContent =
+        typeof lastMessage?.content === "string"
+          ? lastMessage.content.trim()
+          : "";
+      const lastToolCalls =
+        lastMessage?.type === "ai" ? (lastMessage.tool_calls ?? []) : [];
+      if (
+        lastMessage?.type === "ai" &&
+        lastContent.length === 0 &&
+        lastToolCalls.length === 0 &&
+        lastVisibleHuman?.id &&
+        !retriedHumanMessageIdsRef.current.has(lastVisibleHuman.id)
+      ) {
+        retriedHumanMessageIdsRef.current.add(lastVisibleHuman.id);
+        toast("模型返回空结果，正在自动继续一次");
+        retryContinueRef.current?.();
+      }
+    },
+    onToolEnd: ({ name }) => {
+      if (!["write_file", "str_replace", "bash", "present_files"].includes(name)) {
+        return;
+      }
+      if (outputSyncTimerRef.current) {
+        clearTimeout(outputSyncTimerRef.current);
+      }
+      outputSyncTimerRef.current = setTimeout(() => {
+        void mirrorThreadFiles(threadId, "outputs").catch(() => {});
+      }, 600);
     },
   });
+
+  useEffect(() => {
+    retryContinueRef.current = () => {
+      void sendMessage(
+        threadId,
+        { text: "continue", files: [] },
+        { agent_name },
+        {
+          additionalKwargs: {
+            hide_from_ui: true,
+            internal_retry_reason: "empty_assistant_message",
+          },
+        },
+      );
+    };
+    return () => {
+      retryContinueRef.current = null;
+    };
+  }, [agent_name, sendMessage, threadId]);
+
+  useEffect(() => {
+    return () => {
+      if (outputSyncTimerRef.current) {
+        clearTimeout(outputSyncTimerRef.current);
+      }
+    };
+  }, []);
 
   const handleSubmit = useCallback(
     (message: PromptInputMessage) => {
@@ -94,8 +190,14 @@ export default function AgentChatPage() {
     : undefined;
 
   return (
-    <ThreadContext.Provider value={{ thread }}>
-      <ChatBox threadId={threadId}>
+    <ThreadContext.Provider
+      value={{
+        thread,
+        workspaceTargetPath: null,
+        workspaceContainerPath: null,
+      }}
+    >
+      <ChatBox threadId={threadId} workspaceTargetPath={null}>
         <div className="relative flex size-full min-h-0 justify-between">
           <header
             className={cn(
@@ -130,6 +232,7 @@ export default function AgentChatPage() {
               </Tooltip>
               <TokenUsageIndicator messages={thread.messages} />
               <ExportTrigger threadId={threadId} />
+              <ThreadFilesTrigger />
               <ArtifactTrigger />
             </div>
           </header>

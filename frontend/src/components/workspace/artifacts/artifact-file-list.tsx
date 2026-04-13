@@ -1,4 +1,4 @@
-import { DownloadIcon, LoaderIcon, PackageIcon } from "lucide-react";
+import { FolderOpenIcon, LoaderIcon, PackageIcon } from "lucide-react";
 import { useCallback, useState } from "react";
 import { toast } from "sonner";
 
@@ -10,7 +10,6 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
-import { urlOfArtifact } from "@/core/artifacts/utils";
 import { useI18n } from "@/core/i18n/hooks";
 import { installSkill } from "@/core/skills/api";
 import {
@@ -104,20 +103,15 @@ export function ArtifactFileList({
                   {t.common.install}
                 </Button>
               )}
-              <Button variant="ghost" asChild>
-                <a
-                  href={urlOfArtifact({
-                    filepath: file,
-                    threadId: threadId,
-                    download: true,
-                  })}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  onClick={(e) => e.stopPropagation()}
-                >
-                  <DownloadIcon className="size-4" />
-                  {t.common.download}
-                </a>
+              <Button
+                variant="ghost"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  handleClick(file);
+                }}
+              >
+                <FolderOpenIcon className="size-4" />
+                打开
               </Button>
             </CardAction>
           </CardHeader>

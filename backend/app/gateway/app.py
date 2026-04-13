@@ -17,9 +17,11 @@ from app.gateway.routers import (
     runs,
     skills,
     suggestions,
+    thread_files,
     thread_runs,
     threads,
     uploads,
+    workspaces,
 )
 from deerflow.config.app_config import get_app_config
 
@@ -178,6 +180,9 @@ This gateway provides custom endpoints for models, MCP configuration, skills, an
     # Skills API is mounted at /api/skills
     app.include_router(skills.router)
 
+    # Workspaces API is mounted at /api/workspaces
+    app.include_router(workspaces.router)
+
     # Artifacts API is mounted at /api/threads/{thread_id}/artifacts
     app.include_router(artifacts.router)
 
@@ -186,6 +191,9 @@ This gateway provides custom endpoints for models, MCP configuration, skills, an
 
     # Thread cleanup API is mounted at /api/threads/{thread_id}
     app.include_router(threads.router)
+
+    # Thread file browser / mirror API is mounted at /api/threads/{thread_id}/files
+    app.include_router(thread_files.router)
 
     # Agents API is mounted at /api/agents
     app.include_router(agents.router)

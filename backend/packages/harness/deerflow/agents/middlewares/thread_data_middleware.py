@@ -92,6 +92,14 @@ class ThreadDataMiddleware(AgentMiddleware[ThreadDataMiddlewareState]):
             paths = self._create_thread_directories(thread_id)
             logger.debug("Created thread data directories for thread %s", thread_id)
 
+        selected_workspace = context.get("workspace_path")
+        if isinstance(selected_workspace, str) and selected_workspace.strip():
+            paths["workspace_path"] = selected_workspace
+
+        selected_workspace_container = context.get("workspace_container_path")
+        if isinstance(selected_workspace_container, str) and selected_workspace_container.strip():
+            paths["workspace_container_path"] = selected_workspace_container
+
         return {
             "thread_data": {
                 **paths,

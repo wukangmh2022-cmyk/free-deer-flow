@@ -149,6 +149,40 @@ https://github.com/user-attachments/assets/a8bcadc4-e040-4cf2-8fda-dd768b999c18
        api_key: your-actual-api-key-here  # 替换为真实 key
    ```
 
+如果你想复用“已经登录好的 DeepSeek 官网网页”，也可以先启动一个本地 `localhost` 网关，再让 DeerFlow 和 Cherry Studio 都把它当成 OpenAI 兼容接口来连接。这个方式的好处是：
+
+- DeerFlow 前端和 agent 保持原样，不需要重做 UI
+- Cherry Studio 之类的其他客户端也能直接接入
+- 默认按“每个请求独立页面 + 完整 messages 重放”的无状态方式工作，避免多个 app 或多个会话串到同一个网页上下文
+
+启动方式示例：
+
+```bash
+cd deer-flow/backend
+uv run uvicorn app.deepseek_local_provider:app --host 127.0.0.1 --port 8765
+```
+
+首次使用建议先安装 Playwright 浏览器并保持非 headless：
+
+```bash
+uv run python -m playwright install chromium
+DEEPSEEK_WEB_HEADLESS=0 uv run uvicorn app.deepseek_local_provider:app --host 127.0.0.1 --port 8765
+```
+
+然后在 DeerFlow 的 `config.yaml` 里这样配置模型：
+
+```yaml
+models:
+  - name: deepseek-web-local
+    display_name: DeepSeek Web Local
+    use: langchain_openai:ChatOpenAI
+    model: deepseek-web
+    api_key: local-placeholder
+    base_url: http://127.0.0.1:8765/v1
+```
+
+首次启动时，请在对应的 Playwright 持久化 profile 中登录 DeepSeek，并停留在聊天页面。默认 profile 路径是 `~/.deerflow/deepseek-web-profile`，也可以通过环境变量 `DEEPSEEK_WEB_PROFILE` 指定。
+
 ### 运行应用
 
 #### 部署建议与资源规划

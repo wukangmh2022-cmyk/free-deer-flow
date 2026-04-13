@@ -47,6 +47,24 @@ class TestThreadDataMiddleware:
         assert _as_posix(result["thread_data"]["uploads_path"]).endswith("threads/thread-from-config/user-data/uploads")
         assert runtime.context == {}
 
+    def test_before_agent_preserves_bound_workspace_container_path(self, tmp_path):
+        middleware = ThreadDataMiddleware(base_dir=str(tmp_path), lazy_init=True)
+
+        result = middleware.before_agent(
+            state={},
+            runtime=Runtime(
+                context={
+                    "thread_id": "thread-123",
+                    "workspace_path": "/Users/demo/project",
+                    "workspace_container_path": "/mnt/projects/demo",
+                }
+            ),
+        )
+
+        assert result is not None
+        assert result["thread_data"]["workspace_path"] == "/Users/demo/project"
+        assert result["thread_data"]["workspace_container_path"] == "/mnt/projects/demo"
+
     def test_before_agent_raises_clear_error_when_thread_id_missing_everywhere(self, tmp_path, monkeypatch):
         middleware = ThreadDataMiddleware(base_dir=str(tmp_path), lazy_init=True)
         monkeypatch.setattr(

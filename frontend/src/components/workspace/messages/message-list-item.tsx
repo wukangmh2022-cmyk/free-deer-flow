@@ -32,7 +32,9 @@ import { cn } from "@/lib/utils";
 
 import { CopyButton } from "../copy-button";
 
+import { useThread } from "./context";
 import { MarkdownContent } from "./markdown-content";
+import { mapSandboxTextToWorkspace } from "./path-display";
 
 export function MessageListItem({
   className,
@@ -46,6 +48,18 @@ export function MessageListItem({
   threadId: string;
 }) {
   const isHuman = message.type === "human";
+  const { workspaceTargetPath, workspaceContainerPath } = useThread();
+  const rawClipboardData =
+    extractContentFromMessage(message) ??
+    extractReasoningContentFromMessage(message) ??
+    "";
+  const clipboardData = isHuman
+    ? rawClipboardData
+    : mapSandboxTextToWorkspace(
+        rawClipboardData,
+        workspaceTargetPath,
+        workspaceContainerPath,
+      );
   return (
     <AIElementMessage
       className={cn("group/conversation-message relative w-full", className)}
@@ -65,13 +79,7 @@ export function MessageListItem({
           )}
         >
           <div className="flex gap-1">
-            <CopyButton
-              clipboardData={
-                extractContentFromMessage(message) ??
-                extractReasoningContentFromMessage(message) ??
-                ""
-              }
-            />
+            <CopyButton clipboardData={clipboardData} />
           </div>
         </MessageToolbar>
       )}
@@ -122,6 +130,7 @@ function MessageContent_({
 }) {
   const rehypePlugins = useRehypeSplitWordsIntoSpans(isLoading);
   const isHuman = message.type === "human";
+  const { workspaceTargetPath, workspaceContainerPath } = useThread();
   const components = useMemo(
     () => ({
       img: (props: ImgHTMLAttributes<HTMLImageElement>) => (
@@ -133,25 +142,47 @@ function MessageContent_({
 
   const rawContent = extractContentFromMessage(message);
   const reasoningContent = extractReasoningContentFromMessage(message);
+  const mappedRawContent = useMemo(
+    () =>
+      mapSandboxTextToWorkspace(
+        rawContent,
+        workspaceTargetPath,
+        workspaceContainerPath,
+      ),
+    [rawContent, workspaceContainerPath, workspaceTargetPath],
+  );
+  const mappedReasoningContent = useMemo(
+    () =>
+      reasoningContent
+        ? mapSandboxTextToWorkspace(
+            reasoningContent,
+            workspaceTargetPath,
+            workspaceContainerPath,
+          )
+        : reasoningContent,
+    [reasoningContent, workspaceContainerPath, workspaceTargetPath],
+  );
+
+  const filesSourceContent = isHuman ? rawContent : mappedRawContent;
 
   const files = useMemo(() => {
     const files = message.additional_kwargs?.files;
     if (!Array.isArray(files) || files.length === 0) {
-      if (rawContent.includes("<uploaded_files>")) {
+      if (filesSourceContent.includes("<uploaded_files>")) {
         // If the content contains the <uploaded_files> tag, we return the parsed files from the content for backward compatibility.
-        return parseUploadedFiles(rawContent);
+        return parseUploadedFiles(filesSourceContent);
       }
       return null;
     }
     return files as FileInMessage[];
-  }, [message.additional_kwargs?.files, rawContent]);
+  }, [filesSourceContent, message.additional_kwargs?.files]);
 
   const contentToDisplay = useMemo(() => {
     if (isHuman) {
       return rawContent ? stripUploadedFilesTag(rawContent) : "";
     }
-    return rawContent ?? "";
-  }, [rawContent, isHuman]);
+    return mappedRawContent ?? "";
+  }, [mappedRawContent, rawContent, isHuman]);
 
   const filesList =
     files && files.length > 0 ? (
@@ -177,10 +208,10 @@ function MessageContent_({
   // Reasoning-only AI message (no main response content yet)
   if (!isHuman && reasoningContent && !rawContent) {
     return (
-      <AIElementMessageContent className={className}>
+        <AIElementMessageContent className={className}>
         <Reasoning isStreaming={isLoading}>
           <ReasoningTrigger />
-          <ReasoningContent>{reasoningContent}</ReasoningContent>
+          <ReasoningContent>{mappedReasoningContent ?? ""}</ReasoningContent>
         </Reasoning>
       </AIElementMessageContent>
     );

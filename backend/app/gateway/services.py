@@ -284,12 +284,25 @@ async def start_run(
     graph_input = normalize_input(body.input)
     config = build_run_config(thread_id, body.config, body.metadata, assistant_id=body.assistant_id)
 
-    # Merge DeerFlow-specific context overrides into configurable.
-    # The ``context`` field is a custom extension for the langgraph-compat layer
-    # that carries agent configuration (model_name, thinking_enabled, etc.).
-    # Only agent-relevant keys are forwarded; unknown keys (e.g. thread_id) are ignored.
+    # Preserve the full DeerFlow context in ``config["context"]`` so thread-level
+    # middlewares can access bound workspace paths and other runtime-only data.
+    # Agent-relevant keys are also mirrored into ``configurable`` for code paths
+    # that still read model settings from config.configurable.
     context = getattr(body, "context", None)
     if context:
+        runtime_context = config.get("context")
+        if not isinstance(runtime_context, dict):
+            runtime_context = {}
+        else:
+            runtime_context = dict(runtime_context)
+
+        for key, value in context.items():
+            if key == "thread_id":
+                continue
+            runtime_context[key] = value
+        runtime_context["thread_id"] = thread_id
+        config["context"] = runtime_context
+
         _CONTEXT_CONFIGURABLE_KEYS = {
             "model_name",
             "mode",

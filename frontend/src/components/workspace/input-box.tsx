@@ -98,6 +98,21 @@ function getResolvedMode(
   return supportsThinking ? "pro" : "flash";
 }
 
+function suggestionsEnabledForModel(modelName: string | undefined): boolean {
+  if (!modelName) {
+    return true;
+  }
+  return (
+    modelName !== "deepseek-web" &&
+    modelName !== "deepseek-web-deerflow" &&
+    modelName !== "deepseek-web-deerflow-sticky"
+  );
+}
+
+function asOptionalString(value: unknown): string | undefined {
+  return typeof value === "string" ? value : undefined;
+}
+
 export function InputBox({
   className,
   disabled,
@@ -198,6 +213,10 @@ export function InputBox({
   const supportReasoningEffort = useMemo(
     () => selectedModel?.supports_reasoning_effort ?? false,
     [selectedModel],
+  );
+  const suggestionsEnabled = useMemo(
+    () => suggestionsEnabledForModel(asOptionalString(context.model_name)),
+    [context.model_name],
   );
 
   const handleModelSelect = useCallback(
@@ -338,6 +357,7 @@ export function InputBox({
   }, [pendingSuggestion, requestFormSubmit, textInput]);
 
   const showFollowups =
+    suggestionsEnabled &&
     !disabled &&
     !isNewThread &&
     !followupsHidden &&
@@ -358,6 +378,15 @@ export function InputBox({
   }, []);
 
   useEffect(() => {
+    if (suggestionsEnabled) {
+      return;
+    }
+    setFollowups([]);
+    setFollowupsHidden(true);
+    setFollowupsLoading(false);
+  }, [suggestionsEnabled]);
+
+  useEffect(() => {
     const streaming = status === "streaming";
     const wasStreaming = wasStreamingRef.current;
     wasStreamingRef.current = streaming;
@@ -365,7 +394,7 @@ export function InputBox({
       return;
     }
 
-    if (disabled || isMock) {
+    if (!suggestionsEnabled || disabled || isMock) {
       return;
     }
 
@@ -426,7 +455,15 @@ export function InputBox({
       });
 
     return () => controller.abort();
-  }, [context.model_name, disabled, isMock, status, thread.messages, threadId]);
+  }, [
+    context.model_name,
+    disabled,
+    isMock,
+    status,
+    suggestionsEnabled,
+    thread.messages,
+    threadId,
+  ]);
 
   return (
     <div ref={promptRootRef} className="relative flex flex-col gap-4">

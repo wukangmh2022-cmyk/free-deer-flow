@@ -12,6 +12,8 @@ import { env } from "@/env";
 export interface ArtifactsContextType {
   artifacts: string[];
   setArtifacts: (artifacts: string[]) => void;
+  panelTab: "artifacts" | "files";
+  setPanelTab: (tab: "artifacts" | "files") => void;
 
   selectedArtifact: string | null;
   autoSelect: boolean;
@@ -33,6 +35,7 @@ interface ArtifactsProviderProps {
 
 export function ArtifactsProvider({ children }: ArtifactsProviderProps) {
   const [artifacts, setArtifacts] = useState<string[]>([]);
+  const [panelTab, setPanelTab] = useState<"artifacts" | "files">("artifacts");
   const [selectedArtifact, setSelectedArtifact] = useState<string | null>(null);
   const [autoSelect, setAutoSelect] = useState(true);
   const [open, setOpen] = useState(
@@ -44,6 +47,7 @@ export function ArtifactsProvider({ children }: ArtifactsProviderProps) {
   const select = useCallback(
     (artifact: string, autoSelect = false) => {
       setSelectedArtifact(artifact);
+      setPanelTab("artifacts");
       if (env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY !== "true") {
         setSidebarOpen(false);
       }
@@ -57,12 +61,15 @@ export function ArtifactsProvider({ children }: ArtifactsProviderProps) {
   const deselect = useCallback(() => {
     setSelectedArtifact(null);
     setAutoSelect(true);
+    setPanelTab("artifacts");
     setOpen(false);
   }, []);
 
   const value: ArtifactsContextType = {
     artifacts,
     setArtifacts,
+    panelTab,
+    setPanelTab,
 
     open,
     autoOpen,

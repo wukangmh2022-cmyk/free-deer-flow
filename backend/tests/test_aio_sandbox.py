@@ -132,6 +132,19 @@ class TestListDirSerialization:
         assert result == ["/a", "/b"]
         assert lock_was_held == [True], "list_dir must hold the lock during exec_command"
 
+    def test_list_dir_hides_hidden_entries(self, sandbox):
+        sandbox._client.shell.exec_command = MagicMock(
+            return_value=SimpleNamespace(
+                data=SimpleNamespace(
+                    output="/test/visible.txt\n/test/.deerflow\n/test/.gitignore\n/test/node_modules\n/test/src\n/test/src/app.py\n/test/src/.cache"
+                )
+            )
+        )
+
+        result = sandbox.list_dir("/test")
+
+        assert result == ["/test/visible.txt", "/test/src", "/test/src/app.py"]
+
 
 class TestConcurrentFileWrites:
     """Verify file write paths do not lose concurrent updates."""

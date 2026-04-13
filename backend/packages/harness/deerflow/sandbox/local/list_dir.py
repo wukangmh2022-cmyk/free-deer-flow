@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from deerflow.sandbox.search import should_ignore_name
+from deerflow.sandbox.search import should_hide_from_directory_listing_name
 
 
 def list_dir(path: str, max_depth: int = 2) -> list[str]:
@@ -29,7 +29,7 @@ def list_dir(path: str, max_depth: int = 2) -> list[str]:
 
         try:
             for item in current_path.iterdir():
-                if should_ignore_name(item.name):
+                if should_hide_from_directory_listing_name(item.name):
                     continue
 
                 post_fix = "/" if item.is_dir() else ""

@@ -3,11 +3,18 @@ import logging
 import shlex
 import threading
 import uuid
+from pathlib import PurePosixPath
 
 from agent_sandbox import Sandbox as AioSandboxClient
 
 from deerflow.sandbox.sandbox import Sandbox
-from deerflow.sandbox.search import GrepMatch, path_matches, should_ignore_path, truncate_line
+from deerflow.sandbox.search import (
+    GrepMatch,
+    path_matches,
+    should_hide_from_directory_listing_name,
+    should_ignore_path,
+    truncate_line,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -111,7 +118,20 @@ class AioSandbox(Sandbox):
                 result = self._client.shell.exec_command(command=f"find {shlex.quote(path)} -maxdepth {max_depth} -type f -o -type d 2>/dev/null | head -500")
                 output = result.data.output if result.data else ""
                 if output:
-                    return [line.strip() for line in output.strip().split("\n") if line.strip()]
+                    root_path = PurePosixPath(path.rstrip("/") or "/")
+                    visible_entries: list[str] = []
+                    for raw_line in output.strip().split("\n"):
+                        line = raw_line.strip()
+                        if not line:
+                            continue
+                        try:
+                            relative_parts = PurePosixPath(line).relative_to(root_path).parts
+                        except ValueError:
+                            relative_parts = PurePosixPath(line).parts
+                        if any(should_hide_from_directory_listing_name(part) for part in relative_parts):
+                            continue
+                        visible_entries.append(line)
+                    return visible_entries
                 return []
             except Exception as e:
                 logger.error(f"Failed to list directory in sandbox: {e}")

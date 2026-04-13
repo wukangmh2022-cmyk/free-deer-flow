@@ -1,13 +1,15 @@
 "use client";
 
 import { useQuery } from "@tanstack/react-query";
-import { ChevronLeftIcon, FileIcon, FolderIcon, RefreshCcwIcon } from "lucide-react";
+import { ChevronLeftIcon, FileIcon, FolderIcon, RefreshCcwIcon, XIcon } from "lucide-react";
 import { useEffect, useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { browseWorkspace } from "@/core/workspaces/api";
 import type { Workspace } from "@/core/workspaces/types";
+
+import { useArtifacts } from "./context";
 
 function WorkspaceRow({
   item,
@@ -46,6 +48,7 @@ export function ThreadFileBrowser({
 }: {
   workspaceTargetPath?: string | null;
 }) {
+  const { setOpen } = useArtifacts();
   const workspacePath = workspaceTargetPath?.trim() || null;
   const [browsingPath, setBrowsingPath] = useState<string | null>(workspacePath);
 
@@ -82,14 +85,23 @@ export function ThreadFileBrowser({
         <div>
           <div className="text-lg font-medium">Workspace</div>
         </div>
-        <Button
-          size="icon-sm"
-          variant="ghost"
-          onClick={() => void browseQuery.refetch()}
-          disabled={browseQuery.isRefetching}
-        >
-          <RefreshCcwIcon className="size-4" />
-        </Button>
+        <div className="flex items-center gap-1">
+          <Button
+            size="icon-sm"
+            variant="ghost"
+            onClick={() => void browseQuery.refetch()}
+            disabled={browseQuery.isRefetching}
+          >
+            <RefreshCcwIcon className="size-4" />
+          </Button>
+          <Button
+            size="icon-sm"
+            variant="ghost"
+            onClick={() => setOpen(false)}
+          >
+            <XIcon className="size-4" />
+          </Button>
+        </div>
       </div>
 
       <div className="rounded-lg border px-3 py-2">

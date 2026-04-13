@@ -257,6 +257,28 @@ class TestMultipleMounts:
         # Verify the command received the resolved local path
         assert str(data_dir) in captured.get("command", "")
 
+    def test_list_dir_hides_hidden_entries(self, tmp_path):
+        workspace_dir = tmp_path / "workspace"
+        workspace_dir.mkdir()
+        (workspace_dir / "visible.txt").write_text("ok")
+        (workspace_dir / ".gitignore").write_text("*")
+        (workspace_dir / ".deerflow").mkdir()
+        (workspace_dir / "node_modules").mkdir()
+
+        sandbox = LocalSandbox(
+            "test",
+            [
+                PathMapping(container_path="/mnt/workspace", local_path=str(workspace_dir)),
+            ],
+        )
+
+        entries = sandbox.list_dir("/mnt/workspace", max_depth=2)
+
+        assert "/mnt/workspace/visible.txt" in entries
+        assert "/mnt/workspace/.gitignore" not in entries
+        assert "/mnt/workspace/.deerflow/" not in entries
+        assert "/mnt/workspace/node_modules/" not in entries
+
     def test_reverse_resolve_path_does_not_match_partial_prefix(self, tmp_path):
         foo_dir = tmp_path / "foo"
         foo_dir.mkdir()

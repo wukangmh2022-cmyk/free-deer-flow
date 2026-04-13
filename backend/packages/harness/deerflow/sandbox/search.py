@@ -74,6 +74,12 @@ def should_ignore_name(name: str) -> bool:
     return False
 
 
+def should_hide_from_directory_listing_name(name: str) -> bool:
+    if not name or name in {".", ".."}:
+        return False
+    return name.startswith(".") or should_ignore_name(name)
+
+
 def should_ignore_path(path: str) -> bool:
     return any(should_ignore_name(segment) for segment in path.replace("\\", "/").split("/") if segment)
 

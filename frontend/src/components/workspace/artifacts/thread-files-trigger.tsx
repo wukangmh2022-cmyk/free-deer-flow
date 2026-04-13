@@ -6,7 +6,8 @@ import { Tooltip } from "@/components/workspace/tooltip";
 import { useArtifacts } from "./context";
 
 export const ThreadFilesTrigger = () => {
-  const { setOpen, setPanelTab } = useArtifacts();
+  const { open, panelTab, setOpen, setPanelTab } = useArtifacts();
+  const isFilesPanelOpen = open && panelTab === "files";
 
   return (
     <Tooltip content="Show workspace files">
@@ -14,9 +15,14 @@ export const ThreadFilesTrigger = () => {
         className="text-muted-foreground hover:text-foreground"
         variant="ghost"
         onClick={() => {
+          if (isFilesPanelOpen) {
+            setOpen(false);
+            return;
+          }
           setPanelTab("files");
           setOpen(true);
         }}
+        aria-pressed={isFilesPanelOpen}
       >
         <FolderTreeIcon />
         Workspace

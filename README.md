@@ -309,6 +309,28 @@ On Windows, run the local development flow from Git Bash. Native `cmd.exe` and P
 
 6. **Access**: http://localhost:2026
 
+### macOS Desktop Mode (local provider + app window)
+
+If you want a desktop-like workflow on macOS (one command to start DeerFlow + local DeepSeek provider + open app window):
+
+```bash
+make desktop-mac
+```
+
+Stop everything:
+
+```bash
+make desktop-mac-stop
+```
+
+Optional environment overrides before start:
+
+- `DEEPSEEK_LOCAL_MODEL` (default: `DeepSeekV4`)
+- `DEEPSEEK_LOCAL_INTERFACE_MODE` (default: `both`)
+- `DEER_FLOW_SANDBOX_HOST_ROOT` (default: `$HOME`)
+- `DEER_FLOW_SANDBOX_PROJECT_ROOT` (default: `$HOME/Downloads`)
+- `DEEPSEEK_LOCAL_PROVIDER_PORT` (default: `8765`)
+
 #### Startup Modes
 
 DeerFlow supports multiple startup modes across two dimensions:

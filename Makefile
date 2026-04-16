@@ -1,6 +1,6 @@
 # DeerFlow - Unified Development Environment
 
-.PHONY: help config config-upgrade check install dev dev-pro dev-daemon dev-daemon-pro start start-pro start-daemon start-daemon-pro stop up up-pro down clean docker-init docker-start docker-start-pro docker-stop docker-logs docker-logs-frontend docker-logs-gateway
+.PHONY: help config config-upgrade check install dev dev-pro dev-daemon dev-daemon-pro start start-pro start-daemon start-daemon-pro stop up up-pro down clean docker-init docker-start docker-start-pro docker-stop docker-logs docker-logs-frontend docker-logs-gateway desktop-mac desktop-mac-stop
 
 BASH ?= bash
 
@@ -43,6 +43,8 @@ help:
 	@echo "  make docker-logs     - View Docker development logs"
 	@echo "  make docker-logs-frontend - View Docker frontend logs"
 	@echo "  make docker-logs-gateway - View Docker gateway logs"
+	@echo "  make desktop-mac     - Start local provider + DeerFlow and open app mode on macOS"
+	@echo "  make desktop-mac-stop - Stop local provider + DeerFlow app mode on macOS"
 
 config:
 	@$(PYTHON) ./scripts/configure.py
@@ -232,3 +234,9 @@ up-pro:
 # Stop and remove production containers
 down:
 	@./scripts/deploy.sh down
+
+desktop-mac:
+	@./scripts/start-mac-desktop.sh
+
+desktop-mac-stop:
+	@./scripts/stop-mac-desktop.sh

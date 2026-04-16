@@ -15,7 +15,7 @@ import time
 from typing import Any
 
 from fastapi import HTTPException, Request
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 
 from app.gateway.deps import get_checkpointer, get_run_manager, get_store, get_stream_bridge
 from deerflow.runtime import (
@@ -83,18 +83,70 @@ def normalize_input(raw_input: dict[str, Any] | None) -> dict[str, Any]:
             if isinstance(msg, dict):
                 role = msg.get("role", msg.get("type", "user"))
                 content = msg.get("content", "")
+                message_kwargs: dict[str, Any] = {}
+                additional_kwargs = msg.get("additional_kwargs")
+                if isinstance(additional_kwargs, dict):
+                    message_kwargs["additional_kwargs"] = additional_kwargs
+                message_id = msg.get("id")
+                if isinstance(message_id, str) and message_id:
+                    message_kwargs["id"] = message_id
+                message_name = msg.get("name")
+                if isinstance(message_name, str) and message_name:
+                    message_kwargs["name"] = message_name
+
                 if role in ("user", "human"):
-                    converted.append(HumanMessage(content=content))
+                    converted.append(HumanMessage(content=content, **message_kwargs))
+                elif role in ("system",):
+                    converted.append(SystemMessage(content=content, **message_kwargs))
+                elif role in ("assistant", "ai"):
+                    tool_calls = msg.get("tool_calls")
+                    if isinstance(tool_calls, list):
+                        message_kwargs["tool_calls"] = tool_calls
+                    converted.append(AIMessage(content=content, **message_kwargs))
+                elif role in ("tool",):
+                    tool_call_id = msg.get("tool_call_id")
+                    if isinstance(tool_call_id, str) and tool_call_id:
+                        message_kwargs["tool_call_id"] = tool_call_id
+                    converted.append(ToolMessage(content=content, **message_kwargs))
                 else:
-                    # TODO: handle other message types (system, ai, tool)
-                    converted.append(HumanMessage(content=content))
+                    converted.append(HumanMessage(content=content, **message_kwargs))
             else:
                 converted.append(msg)
         return {**raw_input, "messages": converted}
     return raw_input
 
 
+def resolve_disconnect_mode(
+    on_disconnect: str | None,
+    *,
+    stream_resumable: bool | None,
+) -> DisconnectMode:
+    """Resolve effective disconnect behaviour for a run.
+
+    LangGraph's React ``useStream`` transport treats resumable streams as
+    ``onDisconnect="continue"`` by default. Mirror that behavior server-side
+    so clients that omit the field still get resumable semantics.
+    """
+    if on_disconnect == "continue":
+        return DisconnectMode.continue_
+    if on_disconnect == "cancel":
+        return DisconnectMode.cancel
+    return DisconnectMode.continue_ if stream_resumable else DisconnectMode.cancel
+
+
 _DEFAULT_ASSISTANT_ID = "lead_agent"
+_THREAD_METADATA_RUNTIME_CONTEXT_KEYS = {
+    "workspace_id",
+    "workspace_name",
+    "workspace_path",
+    "workspace_container_path",
+}
+_THREAD_CONTEXT_CONFIGURABLE_KEYS = {
+    "workspace_id",
+    "workspace_name",
+    "workspace_path",
+    "workspace_container_path",
+}
 
 
 def resolve_agent_factory(assistant_id: str | None):
@@ -258,7 +310,10 @@ async def start_run(
     checkpointer = get_checkpointer(request)
     store = get_store(request)
 
-    disconnect = DisconnectMode.cancel if body.on_disconnect == "cancel" else DisconnectMode.continue_
+    disconnect = resolve_disconnect_mode(
+        body.on_disconnect,
+        stream_resumable=body.stream_resumable,
+    )
 
     try:
         record = await run_mgr.create_or_reject(
@@ -273,6 +328,21 @@ async def start_run(
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except UnsupportedStrategyError as exc:
         raise HTTPException(status_code=501, detail=str(exc)) from exc
+
+    # Load persisted thread metadata before creating the run so runtime context
+    # can inherit bound workspace information even when this request does not
+    # repeat workspace_path/workspace_container_path explicitly.
+    persisted_thread_metadata: dict[str, Any] = {}
+    if store is not None:
+        try:
+            from app.gateway.routers.threads import _store_get
+
+            thread_record = await _store_get(store, thread_id)
+            metadata = thread_record.get("metadata", {}) if isinstance(thread_record, dict) else {}
+            if isinstance(metadata, dict):
+                persisted_thread_metadata = dict(metadata)
+        except Exception:
+            logger.debug("Failed to load thread metadata for %s before start_run", thread_id, exc_info=True)
 
     # Ensure the thread is visible in /threads/search, even for threads that
     # were never explicitly created via POST /threads (e.g. stateless runs).
@@ -289,30 +359,45 @@ async def start_run(
     # Agent-relevant keys are also mirrored into ``configurable`` for code paths
     # that still read model settings from config.configurable.
     context = getattr(body, "context", None)
-    if context:
-        runtime_context = config.get("context")
-        if not isinstance(runtime_context, dict):
-            runtime_context = {}
-        else:
-            runtime_context = dict(runtime_context)
+    request_metadata = body.metadata if isinstance(body.metadata, dict) else {}
+    runtime_context = config.get("context")
+    if not isinstance(runtime_context, dict):
+        runtime_context = {}
+    else:
+        runtime_context = dict(runtime_context)
 
+    for metadata_source in (persisted_thread_metadata, request_metadata):
+        for key in _THREAD_METADATA_RUNTIME_CONTEXT_KEYS:
+            value = metadata_source.get(key)
+            if value is not None:
+                runtime_context.setdefault(key, value)
+
+    if context:
         for key, value in context.items():
             if key == "thread_id":
                 continue
             runtime_context[key] = value
+
+    if runtime_context or context:
         runtime_context["thread_id"] = thread_id
         config["context"] = runtime_context
 
+    configurable = config.setdefault("configurable", {})
+    for key in _THREAD_CONTEXT_CONFIGURABLE_KEYS:
+        if key in runtime_context:
+            configurable.setdefault(key, runtime_context[key])
+
+    if context:
         _CONTEXT_CONFIGURABLE_KEYS = {
             "model_name",
             "mode",
+            "context_compression_enabled",
             "thinking_enabled",
             "reasoning_effort",
             "is_plan_mode",
             "subagent_enabled",
             "max_concurrent_subagents",
         }
-        configurable = config.setdefault("configurable", {})
         for key in _CONTEXT_CONFIGURABLE_KEYS:
             if key in context:
                 configurable.setdefault(key, context[key])

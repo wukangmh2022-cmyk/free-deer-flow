@@ -15,7 +15,7 @@ OUTPUTS_VIRTUAL_PREFIX = f"{VIRTUAL_PATH_PREFIX}/outputs"
 def _normalize_presented_filepath(
     runtime: ToolRuntime[ContextT, ThreadState],
     filepath: str,
-) -> str:
+) -> tuple[str, Path]:
     """Normalize a presented file path to the `/mnt/user-data/outputs/*` contract.
 
     Accepts either:
@@ -24,7 +24,7 @@ def _normalize_presented_filepath(
       `/app/backend/.deer-flow/threads/<thread>/user-data/outputs/report.md`
 
     Returns:
-        The normalized virtual path.
+        The normalized virtual path and resolved host path.
 
     Raises:
         ValueError: If runtime metadata is missing or the path is outside the
@@ -56,7 +56,10 @@ def _normalize_presented_filepath(
     except ValueError as exc:
         raise ValueError(f"Only files in {OUTPUTS_VIRTUAL_PREFIX} can be presented: {filepath}") from exc
 
-    return f"{OUTPUTS_VIRTUAL_PREFIX}/{relative_path.as_posix()}"
+    if not actual_path.exists() or not actual_path.is_file():
+        raise ValueError(f"Artifact file does not exist: {filepath}")
+
+    return f"{OUTPUTS_VIRTUAL_PREFIX}/{relative_path.as_posix()}", actual_path
 
 
 @tool("present_files", parse_docstring=True)
@@ -85,7 +88,7 @@ def present_file_tool(
         filepaths: List of absolute file paths to present to the user. **Only** files in `/mnt/user-data/outputs` can be presented.
     """
     try:
-        normalized_paths = [_normalize_presented_filepath(runtime, filepath) for filepath in filepaths]
+        normalized_paths = [_normalize_presented_filepath(runtime, filepath)[0] for filepath in filepaths]
     except ValueError as exc:
         return Command(
             update={"messages": [ToolMessage(f"Error: {exc}", tool_call_id=tool_call_id)]},

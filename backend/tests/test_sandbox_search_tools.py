@@ -1,10 +1,11 @@
 from types import SimpleNamespace
 from unittest.mock import patch
+from pathlib import Path
 
 from deerflow.community.aio_sandbox.aio_sandbox import AioSandbox
 from deerflow.sandbox.local.local_sandbox import LocalSandbox
 from deerflow.sandbox.search import GrepMatch, find_glob_matches, find_grep_matches
-from deerflow.sandbox.tools import glob_tool, grep_tool
+from deerflow.sandbox.tools import glob_tool, grep_tool, ls_tool
 
 
 def _make_runtime(tmp_path):
@@ -19,6 +20,27 @@ def _make_runtime(tmp_path):
             "sandbox": {"sandbox_id": "local"},
             "thread_data": {
                 "workspace_path": str(workspace),
+                "uploads_path": str(uploads),
+                "outputs_path": str(outputs),
+            },
+        },
+        context={"thread_id": "thread-1"},
+    )
+
+
+def _make_bound_workspace_runtime(tmp_path):
+    workspace = tmp_path / "workspace"
+    uploads = tmp_path / "uploads"
+    outputs = tmp_path / "outputs"
+    workspace.mkdir()
+    uploads.mkdir()
+    outputs.mkdir()
+    return SimpleNamespace(
+        state={
+            "sandbox": {"sandbox_id": "sandbox-1"},
+            "thread_data": {
+                "workspace_path": str(workspace),
+                "workspace_container_path": "/mnt/workspaces/demo",
                 "uploads_path": str(uploads),
                 "outputs_path": str(outputs),
             },
@@ -49,6 +71,102 @@ def test_glob_tool_returns_virtual_paths_and_ignores_common_dirs(tmp_path, monke
     assert "/mnt/user-data/workspace/pkg/util.py" in result
     assert "node_modules" not in result
     assert str(workspace) not in result
+
+
+def test_glob_tool_maps_bound_host_workspace_path_to_container_path_for_non_local_runtime(tmp_path, monkeypatch) -> None:
+    runtime = _make_bound_workspace_runtime(tmp_path)
+    workspace = tmp_path / "workspace"
+    captured: dict[str, object] = {}
+
+    class FakeSandbox:
+        def glob(self, path, pattern, include_dirs=False, max_results=200):
+            captured["path"] = path
+            captured["pattern"] = pattern
+            captured["include_dirs"] = include_dirs
+            captured["max_results"] = max_results
+            return ["/mnt/workspaces/demo/overtime.csv"], False
+
+    monkeypatch.setattr("deerflow.sandbox.tools.ensure_sandbox_initialized", lambda runtime: FakeSandbox())
+    monkeypatch.setattr("deerflow.sandbox.tools.is_local_sandbox", lambda runtime: False)
+
+    result = glob_tool.func(
+        runtime=runtime,
+        description="find overtime files",
+        pattern="**/*.{csv,xlsx,xls}",
+        path=str(workspace),
+    )
+
+    assert captured["path"] == "/mnt/workspaces/demo"
+    assert "/mnt/workspaces/demo/overtime.csv" in result
+    assert f"under {workspace}" in result
+
+
+def test_glob_tool_resolves_custom_mount_container_path_in_local_runtime(tmp_path, monkeypatch) -> None:
+    runtime = _make_bound_workspace_runtime(tmp_path)
+    workspace = tmp_path / "workspace"
+    (workspace / "nested").mkdir()
+    (workspace / "nested" / "overtime.csv").write_text("ok\n", encoding="utf-8")
+    mount = SimpleNamespace(
+        host_path=str(workspace),
+        container_path="/mnt/workspaces/demo",
+        read_only=False,
+    )
+
+    monkeypatch.setattr("deerflow.sandbox.tools.ensure_sandbox_initialized", lambda runtime: LocalSandbox(id="local"))
+    monkeypatch.setattr("deerflow.sandbox.tools.is_local_sandbox", lambda runtime: True)
+    monkeypatch.setattr("deerflow.sandbox.tools._get_custom_mounts", lambda: [mount])
+
+    result = glob_tool.func(
+        runtime=runtime,
+        description="find overtime files in custom mount",
+        pattern="**/*.csv",
+        path="/mnt/workspaces/demo",
+    )
+
+    assert "/mnt/workspaces/demo/nested/overtime.csv" in result
+    assert str(workspace) not in result
+
+
+def test_ls_tool_maps_bound_host_workspace_path_to_container_path_for_non_local_runtime(tmp_path, monkeypatch) -> None:
+    runtime = _make_bound_workspace_runtime(tmp_path)
+    workspace = tmp_path / "workspace"
+    captured: dict[str, object] = {}
+
+    class FakeSandbox:
+        def list_dir(self, path, max_depth=4):
+            captured["path"] = path
+            captured["max_depth"] = max_depth
+            return ["/mnt/workspaces/demo/data", "/mnt/workspaces/demo/report.csv"]
+
+    monkeypatch.setattr("deerflow.sandbox.tools.ensure_sandbox_initialized", lambda runtime: FakeSandbox())
+    monkeypatch.setattr("deerflow.sandbox.tools.is_local_sandbox", lambda runtime: False)
+
+    result = ls_tool.func(
+        runtime=runtime,
+        description="inspect bound workspace",
+        path=str(workspace),
+    )
+
+    assert captured["path"] == "/mnt/workspaces/demo"
+    assert "/mnt/workspaces/demo/report.csv" in result
+
+
+def test_glob_tool_accepts_bound_host_workspace_path(tmp_path, monkeypatch) -> None:
+    runtime = _make_runtime(tmp_path)
+    workspace = tmp_path / "workspace"
+    (workspace / "analysis.py").write_text("print('ok')\n", encoding="utf-8")
+
+    monkeypatch.setattr("deerflow.sandbox.tools.ensure_sandbox_initialized", lambda runtime: LocalSandbox(id="local"))
+
+    result = glob_tool.func(
+        runtime=runtime,
+        description="find python files from host path",
+        pattern="**/*.py",
+        path=str(workspace),
+    )
+
+    assert str(workspace) in result
+    assert "/mnt/user-data/workspace/analysis.py" in result
 
 
 def test_glob_tool_supports_skills_virtual_paths(tmp_path, monkeypatch) -> None:
@@ -94,6 +212,31 @@ def test_grep_tool_filters_by_glob_and_skips_binary_files(tmp_path, monkeypatch)
     assert "/mnt/user-data/workspace/main.py:1: TODO = 'ship it'" in result
     assert "notes.txt" not in result
     assert "image.bin" not in result
+    assert str(workspace) not in result
+
+
+def test_grep_tool_resolves_custom_mount_container_path_in_local_runtime(tmp_path, monkeypatch) -> None:
+    runtime = _make_bound_workspace_runtime(tmp_path)
+    workspace = tmp_path / "workspace"
+    (workspace / "main.py").write_text("TODO = 'ship it'\n", encoding="utf-8")
+    mount = SimpleNamespace(
+        host_path=str(workspace),
+        container_path="/mnt/workspaces/demo",
+        read_only=False,
+    )
+
+    monkeypatch.setattr("deerflow.sandbox.tools.ensure_sandbox_initialized", lambda runtime: LocalSandbox(id="local"))
+    monkeypatch.setattr("deerflow.sandbox.tools.is_local_sandbox", lambda runtime: True)
+    monkeypatch.setattr("deerflow.sandbox.tools._get_custom_mounts", lambda: [mount])
+
+    result = grep_tool.func(
+        runtime=runtime,
+        description="find todo references in custom mount",
+        pattern="TODO",
+        path="/mnt/workspaces/demo",
+    )
+
+    assert "/mnt/workspaces/demo/main.py:1: TODO = 'ship it'" in result
     assert str(workspace) not in result
 
 
@@ -290,6 +433,20 @@ def test_find_glob_matches_raises_not_a_directory(tmp_path) -> None:
         assert False, "Expected NotADirectoryError"
     except NotADirectoryError:
         pass
+
+
+def test_find_glob_matches_supports_brace_expansion(tmp_path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "main.cpp").write_text("// cpp\n", encoding="utf-8")
+    (workspace / "main.h").write_text("// h\n", encoding="utf-8")
+    (workspace / "note.txt").write_text("ignore\n", encoding="utf-8")
+
+    matches, truncated = find_glob_matches(workspace, "**/*.{c,cpp,h,hpp}")
+
+    assert truncated is False
+    match_names = sorted([Path(item).name for item in matches])
+    assert match_names == ["main.cpp", "main.h"]
 
 
 def test_find_grep_matches_raises_not_a_directory(tmp_path) -> None:

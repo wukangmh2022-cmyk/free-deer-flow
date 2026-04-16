@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import threading
 import time
@@ -61,6 +62,17 @@ DEFAULT_SEND_SELECTORS = (
     'button:has-text("Send")',
     'button:has-text("发送")',
 )
+THINKING_TOGGLE_TOKENS: tuple[tuple[str, int], ...] = (
+    ("深度思考", 240),
+    ("deepthink", 220),
+    ("deep think", 220),
+    ("推理", 180),
+    ("reasoning", 160),
+    ("思考", 140),
+    ("thinking", 120),
+    ("r1", 80),
+    ("think", 60),
+)
 DEFAULT_NEW_CHAT_SELECTORS = (
     'a[href="/new"]',
     'button:has-text("New Chat")',
@@ -81,8 +93,17 @@ DEFAULT_ASSISTANT_SELECTORS = (
 )
 PROMPT_REPLAY_MARKERS = (
     "You are acting as the backend LLM for a local OpenAI-compatible gateway.",
+    "You are acting as the backend LLM for a local OpenAI-compatible chat gateway.",
     "Continue the existing DeerFlow session already initialized in this chat.",
     "Return exactly one JSON object with this schema:",
+    "Output should be clean assistant output (plain text by default), not a custom wrapper schema.",
+)
+PROMPT_REPLAY_HINTS = (
+    "you are acting as the backend llm for a local openai-compatible",
+    "continue this conversation naturally and follow the system/user/tool messages",
+    "continue the existing deerflow session already initialized in this chat",
+    "available tools (openai tools schema)",
+    "conversation:\n\n[user]",
 )
 SCHEMA_EXAMPLE_MARKERS = (
     '"content":"string"',
@@ -90,7 +111,24 @@ SCHEMA_EXAMPLE_MARKERS = (
     '"arguments":{}',
     '"id":"string"',
 )
+TOOL_NAME_ALIASES = {
+    "bash": "bash",
+    "shell": "bash",
+    "terminal": "bash",
+    "ls": "ls",
+    "listdir": "ls",
+    "list_dir": "ls",
+    "list-dir": "ls",
+    "writefile": "write_file",
+    "write_file": "write_file",
+    "write-file": "write_file",
+    "readfile": "read_file",
+    "read_file": "read_file",
+    "read-file": "read_file",
+}
 CHAT_URL_RE = re.compile(r"^https://chat\.deepseek\.com/a/chat/s/[A-Za-z0-9-]+/?$")
+DEFAULT_COPY_PROBE_MAX_MS = int(os.environ.get("DEEPSEEK_WEB_COPY_PROBE_MAX_MS", "500"))
+DEFAULT_COPY_CANDIDATE_MAX_DISTANCE = int(os.environ.get("DEEPSEEK_WEB_COPY_CANDIDATE_MAX_DISTANCE", "900"))
 
 
 @dataclass
@@ -535,6 +573,28 @@ def looks_like_assistant_payload_candidate(text: str) -> bool:
     return '"content"' in stripped or '"tool_' in stripped or '"tool_calls"' in stripped
 
 
+def is_prompt_replay_text(text: str) -> bool:
+    stripped = text.strip()
+    if not stripped:
+        return False
+    if any(marker in stripped for marker in PROMPT_REPLAY_MARKERS):
+        return True
+    lowered = stripped.lower()
+    return sum(1 for hint in PROMPT_REPLAY_HINTS if hint in lowered) >= 2
+
+
+def normalize_tool_name(name: Any) -> str:
+    if not isinstance(name, str):
+        return ""
+    compact = name.strip()
+    if not compact:
+        return ""
+    key = compact.lower().replace(" ", "").replace("-", "_")
+    if compact.islower() or any(ch in compact for ch in ("-", "_", " ")):
+        return TOOL_NAME_ALIASES.get(key, compact)
+    return compact
+
+
 def choose_best_assistant_text(candidates: list[str]) -> str:
     normalized = [candidate.strip() for candidate in candidates if isinstance(candidate, str) and candidate.strip()]
     if not normalized:
@@ -551,19 +611,14 @@ def choose_best_assistant_text(candidates: list[str]) -> str:
 def assistant_candidate_score(candidate: dict[str, Any]) -> tuple[int, int, int]:
     text = candidate.get("text")
     if not isinstance(text, str):
-        return (-10_000, 0, -1)
+        return (-10_000, -1, 0)
 
     stripped = text.strip()
     if not stripped:
-        return (-10_000, 0, -1)
+        return (-10_000, -1, 0)
 
-    score = 0
-    if looks_like_assistant_payload_candidate(stripped):
-        score += 100
-    if is_assistant_payload_text(stripped):
-        score += 50
-    if any(marker in stripped for marker in PROMPT_REPLAY_MARKERS):
-        score -= 250
+    if is_prompt_replay_text(stripped):
+        return (-9_000, -1, len(stripped))
 
     index = candidate.get("index")
     try:
@@ -571,7 +626,15 @@ def assistant_candidate_score(candidate: dict[str, Any]) -> tuple[int, int, int]
     except Exception:
         normalized_index = -1
 
-    return (score, len(stripped), normalized_index)
+    score = 0
+    if looks_like_assistant_payload_candidate(stripped):
+        score += 100
+    if is_assistant_payload_text(stripped):
+        score += 50
+
+    # In multi-turn sticky chats, the latest assistant block is the reply we need.
+    # Prefer recency first, then use payload quality/length as tie-breakers.
+    return (normalized_index, score, len(stripped))
 
 
 def choose_best_assistant_candidate(candidates: list[dict[str, Any]]) -> dict[str, Any] | None:
@@ -611,19 +674,15 @@ def is_schema_example_payload_text(text: str) -> bool:
 def payload_candidate_score(candidate: dict[str, Any]) -> tuple[int, int, int]:
     text = candidate.get("text")
     if not isinstance(text, str):
-        return (-10_000, 0, -1)
+        return (-10_000, -1, 0)
 
     stripped = text.strip()
     if not stripped:
-        return (-10_000, 0, -1)
+        return (-10_000, -1, 0)
     if is_schema_example_payload_text(stripped):
-        return (-9_000, len(stripped), -1)
-
-    score = 0
-    if looks_like_assistant_payload_candidate(stripped):
-        score += 100
-    if is_assistant_payload_text(stripped):
-        score += 200
+        return (-9_000, -1, len(stripped))
+    if is_prompt_replay_text(stripped):
+        return (-8_000, -1, len(stripped))
 
     dom_index = candidate.get("domIndex")
     try:
@@ -631,7 +690,15 @@ def payload_candidate_score(candidate: dict[str, Any]) -> tuple[int, int, int]:
     except Exception:
         normalized_index = -1
 
-    return (score, len(stripped), normalized_index)
+    score = 0
+    if looks_like_assistant_payload_candidate(stripped):
+        score += 100
+    if is_assistant_payload_text(stripped):
+        score += 200
+
+    # DOM order tracks conversation order; latest payload should win over an
+    # older but longer/cleaner payload when extracting the current turn reply.
+    return (normalized_index, score, len(stripped))
 
 
 def choose_best_payload_candidate(candidates: list[dict[str, Any]]) -> dict[str, Any] | None:
@@ -711,6 +778,50 @@ def is_assistant_payload_text(text: str) -> bool:
         return True
 
     return salvage_tool_calls_payload(stripped) is not None
+
+
+def is_placeholder_assistant_payload_text(text: str) -> bool:
+    stripped = text.strip()
+    if not stripped:
+        return False
+
+    try:
+        payload = extract_json_object(stripped)
+    except Exception:
+        payload = None
+
+    if not isinstance(payload, dict):
+        return False
+
+    content = payload.get("content")
+    tool_calls = payload.get("tool_calls")
+
+    if isinstance(content, str) and isinstance(tool_calls, list):
+        if content.strip().lower() in {"string", "<assistant_message>", "assistant_message"} and not tool_calls:
+            return True
+        if tool_calls and all(
+            isinstance(call, dict)
+            and str(call.get("name", "")).strip().lower() in {"string", "<tool_name>", "tool_name"}
+            and str(call.get("id", "")).strip().lower() in {"string", "<id>", "id"}
+            and isinstance(call.get("arguments"), dict)
+            and not call.get("arguments")
+            for call in tool_calls
+        ):
+            return True
+    return False
+
+
+def is_suspicious_short_fragment(text: str) -> bool:
+    stripped = text.strip()
+    if not stripped:
+        return False
+    if len(stripped) > 6:
+        return False
+    if looks_like_assistant_payload_candidate(stripped) or is_assistant_payload_text(stripped):
+        return False
+    if any(ch in stripped for ch in "{}[]\":,`"):
+        return False
+    return True
 
 
 def _append_transport_payload_candidates(candidates: list[str], value: Any) -> None:
@@ -1232,6 +1343,7 @@ class DeepSeekWebBridge:
         sticky_reanchor_messages: int | None = 24,
         session_state_path: str | None = None,
         reuse_persisted_chat: bool = False,
+        copy_probe_max_ms: int = DEFAULT_COPY_PROBE_MAX_MS,
     ) -> None:
         self.url = url
         self.user_data_dir = user_data_dir
@@ -1250,6 +1362,8 @@ class DeepSeekWebBridge:
         self.sticky_reanchor_messages = sticky_reanchor_messages
         self.session_state_path = session_state_path
         self.reuse_persisted_chat = reuse_persisted_chat
+        self.copy_probe_max_ms = max(0, int(copy_probe_max_ms))
+        self.copy_candidate_max_distance = max(0, int(DEFAULT_COPY_CANDIDATE_MAX_DISTANCE))
 
         self._playwright = None
         self._browser_type = None
@@ -1261,6 +1375,9 @@ class DeepSeekWebBridge:
         self._sticky_messages_since_full = 0
         self._persisted_chat_url: str | None = None
         self._state_loaded = False
+        self._active_session_state_path: str | None = None
+        self._active_sticky_marker: str | None = None
+        self._thinking_enabled: bool | None = None
         self._lock = threading.RLock()
 
     def close(self) -> None:
@@ -1274,19 +1391,53 @@ class DeepSeekWebBridge:
             self._actual_headless = None
             self._browser_type = None
             self._playwright = None
-            self._sticky_initialized = False
-            self._sticky_last_messages = []
-            self._sticky_messages_since_full = 0
-            self._persisted_chat_url = None
-            self._state_loaded = False
+            self._clear_session_runtime_state()
+            self._active_session_state_path = None
+            self._active_sticky_marker = None
+
+    def _clear_session_runtime_state(self) -> None:
+        self._sticky_initialized = False
+        self._sticky_last_messages = []
+        self._sticky_messages_since_full = 0
+        self._persisted_chat_url = None
+        self._state_loaded = False
+        self._thinking_enabled = None
+
+    def _resolved_session_state_path(self) -> str | None:
+        if not self.session_state_path:
+            return None
+        return str(Path(self.session_state_path).expanduser().resolve())
+
+    def _state_path_for_io(self) -> Path | None:
+        path_value = self._active_session_state_path or self._resolved_session_state_path()
+        if not path_value:
+            return None
+        return Path(path_value)
+
+    def _switch_session_if_needed(self) -> None:
+        requested_state_path = self._resolved_session_state_path()
+        requested_marker = self.sticky_marker
+        if (
+            requested_state_path == self._active_session_state_path
+            and requested_marker == self._active_sticky_marker
+        ):
+            return
+
+        if self._active_session_state_path is not None or self._active_sticky_marker is not None:
+            self._save_session_state()
+
+        self._clear_session_runtime_state()
+        self._active_session_state_path = requested_state_path
+        self._active_sticky_marker = requested_marker
+        self.reset_page()
 
     def _load_session_state(self) -> None:
         if self._state_loaded:
             return
         self._state_loaded = True
-        if not self.session_state_path:
+        path = self._state_path_for_io()
+        if path is None:
             return
-        path = Path(self.session_state_path).expanduser().resolve()
         try:
             if not path.exists():
                 return
@@ -1313,10 +1464,14 @@ class DeepSeekWebBridge:
         if isinstance(sticky_initialized, bool):
             self._sticky_initialized = sticky_initialized
 
+        thinking_enabled = data.get("thinking_enabled")
+        if isinstance(thinking_enabled, bool):
+            self._thinking_enabled = thinking_enabled
+
     def _save_session_state(self) -> None:
-        if not self.session_state_path:
+        path = self._state_path_for_io()
+        if path is None:
             return
-        path = Path(self.session_state_path).expanduser().resolve()
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(
@@ -1326,6 +1481,7 @@ class DeepSeekWebBridge:
                         "sticky_initialized": self._sticky_initialized,
                         "sticky_last_messages": self._sticky_last_messages,
                         "sticky_messages_since_full": self._sticky_messages_since_full,
+                        "thinking_enabled": self._thinking_enabled,
                     },
                     ensure_ascii=False,
                     indent=2,
@@ -1406,11 +1562,25 @@ class DeepSeekWebBridge:
         *,
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
+        thinking_enabled: bool | None = None,
         include_debug: bool = False,
+        output_protocol: str = "openai",
     ) -> dict[str, Any]:
         trace = DeepSeekTrace()
-        raw_text = self.submit_prompt(messages=messages, tools=tools or [], trace=trace)
+        raw_text = self.submit_prompt(
+            messages=messages,
+            tools=tools or [],
+            thinking_enabled=thinking_enabled,
+            output_protocol=output_protocol,
+            trace=trace,
+        )
+        trace.mark("submit_prompt_done")
+        parse_started = time.perf_counter()
         payload = self.parse_model_payload(raw_text)
+        trace.set("parse_model_payload_ms", int((time.perf_counter() - parse_started) * 1000))
+        trace.mark("payload_parsed")
+        trace.set("mark_count", len(trace.marks))
+        trace.set("mark_names", list(trace.marks.keys()))
         timing = trace.as_dict()
         logger.info("DeepSeek web bridge timing: %s", timing)
         if include_debug:
@@ -1452,27 +1622,272 @@ class DeepSeekWebBridge:
             trace.set("page_reused", False)
             trace.mark("page_ready")
 
-    def build_full_prompt(self, *, messages: list[dict[str, Any]], tools: list[dict[str, Any]]) -> str:
+    def inspect_thinking_toggle_candidates(self, page: Page, *, limit: int = 12) -> list[dict[str, Any]]:
+        try:
+            result = page.evaluate(
+                """({ selectors, limit, tokenWeights }) => {
+                    for (const node of document.querySelectorAll('[data-deerflow-thinking-candidate-id]')) {
+                        node.removeAttribute('data-deerflow-thinking-candidate-id');
+                    }
+
+                    const isVisible = (node) => {
+                        if (!(node instanceof HTMLElement)) {
+                            return false;
+                        }
+                        const style = window.getComputedStyle(node);
+                        if (style.visibility === 'hidden' || style.display === 'none' || style.opacity === '0') {
+                            return false;
+                        }
+                        const rect = node.getBoundingClientRect();
+                        return !!rect.width && !!rect.height;
+                    };
+
+                    let input = null;
+                    for (const selector of selectors) {
+                        const nodes = [...document.querySelectorAll(selector)].filter(isVisible);
+                        if (nodes.length > 0) {
+                            input = nodes[nodes.length - 1];
+                            break;
+                        }
+                    }
+                    const inputRect = input instanceof HTMLElement ? input.getBoundingClientRect() : null;
+
+                    const candidates = [];
+                    let candidateId = 0;
+                    for (const node of document.querySelectorAll('button,[role="button"],div[role="button"]')) {
+                        if (!(node instanceof HTMLElement) || !isVisible(node)) {
+                            continue;
+                        }
+
+                        const rect = node.getBoundingClientRect();
+                        const label = [
+                            node.getAttribute('aria-label') || '',
+                            node.getAttribute('title') || '',
+                            node.innerText || '',
+                            node.textContent || '',
+                        ].join(' ').replace(/\\s+/g, ' ').trim();
+                        const normalizedLabel = label.toLowerCase();
+                        const className = typeof node.className === 'string' ? node.className : '';
+                        const normalizedClassName = className.toLowerCase();
+                        let tokenScore = 0;
+                        for (const [token, weight] of tokenWeights) {
+                            if (normalizedLabel.includes(token) || normalizedClassName.includes(token)) {
+                                tokenScore += weight;
+                            }
+                        }
+                        if (tokenScore <= 0) {
+                            continue;
+                        }
+
+                        const distance = inputRect
+                            ? Math.abs(rect.left - inputRect.left) + Math.abs(rect.top - inputRect.top)
+                            : 999999;
+                        node.dataset.deerflowThinkingCandidateId = String(candidateId);
+                        candidates.push({
+                            probeId: String(candidateId),
+                            label,
+                            className,
+                            ariaPressed: node.getAttribute('aria-pressed'),
+                            ariaChecked: node.getAttribute('aria-checked'),
+                            dataState: node.getAttribute('data-state'),
+                            disabled: node.getAttribute('aria-disabled') || (node.hasAttribute('disabled') ? 'true' : null),
+                            backgroundColor: window.getComputedStyle(node).backgroundColor,
+                            borderColor: window.getComputedStyle(node).borderColor,
+                            tokenScore,
+                            distance,
+                            html: node.outerHTML.slice(0, 280),
+                        });
+                        candidateId += 1;
+                    }
+
+                    candidates.sort((a, b) => {
+                        if (a.tokenScore !== b.tokenScore) {
+                            return b.tokenScore - a.tokenScore;
+                        }
+                        return a.distance - b.distance;
+                    });
+                    return {
+                        inputFound: !!input,
+                        url: location.href,
+                        candidates: candidates.slice(0, limit),
+                    };
+                }""",
+                {
+                    "selectors": list(self.input_selectors),
+                    "limit": limit,
+                    "tokenWeights": list(THINKING_TOGGLE_TOKENS),
+                },
+            )
+        except Exception:
+            logger.debug("Failed to inspect DeepSeek thinking toggle candidates.", exc_info=True)
+            return []
+
+        if not isinstance(result, dict):
+            return []
+        candidates = result.get("candidates")
+        return candidates if isinstance(candidates, list) else []
+
+    def _thinking_candidate_state(self, candidate: dict[str, Any] | None) -> bool | None:
+        if not isinstance(candidate, dict):
+            return None
+
+        def normalize_flag(value: Any) -> bool | None:
+            if isinstance(value, bool):
+                return value
+            if not isinstance(value, str):
+                return None
+            lowered = value.strip().lower()
+            if lowered in {"true", "1", "on", "yes", "checked", "selected", "active"}:
+                return True
+            if lowered in {"false", "0", "off", "no", "unchecked", "unselected", "inactive"}:
+                return False
+            return None
+
+        for key in ("ariaPressed", "ariaChecked", "dataState"):
+            normalized = normalize_flag(candidate.get(key))
+            if normalized is not None:
+                return normalized
+
+        class_name = str(candidate.get("className") or "").lower()
+        if "ds-toggle-button" in class_name:
+            return "ds-toggle-button--selected" in class_name
+        positive_markers = (" selected", "--selected", " active", "--active", " checked", "--checked", " pressed", "--pressed", " is-active")
+        negative_markers = (" inactive", "--inactive", " unselected", "--unselected", " unchecked", "--unchecked")
+        if any(marker in class_name for marker in positive_markers):
+            return True
+        if any(marker in class_name for marker in negative_markers):
+            return False
+        return None
+
+    def inspect_thinking_mode(self, page: Page) -> dict[str, Any]:
+        candidates = self.inspect_thinking_toggle_candidates(page)
+        selected_candidate = candidates[0] if candidates else None
+        current = self._thinking_candidate_state(selected_candidate)
+        if current is None and self._thinking_enabled is not None:
+            current = self._thinking_enabled
+        return {
+            "url": page.url,
+            "thinking_enabled": current,
+            "candidate_count": len(candidates),
+            "selected_candidate": selected_candidate,
+            "candidates": candidates,
+        }
+
+    def sync_thinking_mode(
+        self,
+        page: Page,
+        desired: bool | None,
+        *,
+        trace: DeepSeekTrace | None = None,
+    ) -> dict[str, Any]:
+        before = self.inspect_thinking_mode(page)
+        if desired is None:
+            if isinstance(before.get("thinking_enabled"), bool):
+                self._thinking_enabled = before["thinking_enabled"]
+            return {
+                "changed": False,
+                "requested": desired,
+                "before": before,
+                "after": before,
+            }
+
+        if trace is not None:
+            trace.set("thinking_requested", desired)
+            trace.set("thinking_before", before.get("thinking_enabled"))
+
+        if before.get("thinking_enabled") is desired:
+            self._thinking_enabled = desired
+            if trace is not None:
+                trace.set("thinking_changed", False)
+            return {
+                "changed": False,
+                "requested": desired,
+                "before": before,
+                "after": before,
+            }
+
+        selected_candidate = before.get("selected_candidate") or {}
+        probe_id = selected_candidate.get("probeId")
+        if not isinstance(probe_id, str):
+            return {
+                "changed": False,
+                "requested": desired,
+                "before": before,
+                "after": before,
+                "error": "Thinking toggle button not found.",
+            }
+
+        try:
+            button = page.locator(f'[data-deerflow-thinking-candidate-id="{probe_id}"]').first
+            button.click(timeout=1500)
+            page.wait_for_timeout(500)
+        except Exception as exc:
+            return {
+                "changed": False,
+                "requested": desired,
+                "before": before,
+                "after": self.inspect_thinking_mode(page),
+                "error": f"Failed to click thinking toggle: {exc}",
+            }
+
+        after = self.inspect_thinking_mode(page)
+        current = after.get("thinking_enabled")
+        changed = before.get("thinking_enabled") != current
+        if current is desired:
+            self._thinking_enabled = desired
+        if trace is not None:
+            trace.set("thinking_after", current)
+            trace.set("thinking_changed", changed)
+        return {
+            "changed": changed,
+            "requested": desired,
+            "before": before,
+            "after": after,
+        }
+
+    def debug_sync_thinking_mode(self, desired: bool | None, *, visible: bool = False) -> dict[str, Any]:
+        page = self.ensure_page(visible=visible)
+        ready_error: str | None = None
+        try:
+            self.ensure_chat_ready(page)
+        except Exception as exc:
+            ready_error = str(exc)
+
+        if ready_error is not None:
+            inspection = self.inspect_thinking_mode(page)
+            inspection["error"] = ready_error
+            inspection["requested"] = desired
+            inspection["changed"] = False
+            inspection["before"] = inspection
+            inspection["after"] = inspection
+            return inspection
+
+        return self.sync_thinking_mode(page, desired)
+
+    def build_full_prompt(self, *, messages: list[dict[str, Any]], tools: list[dict[str, Any]], output_protocol: str = "openai") -> str:
         parts = [
-            "You are acting as the backend LLM for a local OpenAI-compatible gateway.",
-            "Return exactly one JSON object with this schema:",
-            '{"content":"string","tool_calls":[{"name":"string","arguments":{},"id":"string"}]}',
-            "Rules:",
-            "- Return JSON only.",
-            '- If no tool call is needed, set "tool_calls" to [].',
-            '- If a tool call is needed, content may be empty.',
-            "- Do not use markdown fences.",
-            "- If the user asks to create, edit, read, list, search, or run something and matching tools are available, you MUST use tool_calls instead of only describing what would happen.",
-            "- Never claim a file was written, modified, or listed unless you emitted the corresponding tool call.",
-            '- Use a normal "arguments" object for tool calls.',
-            '- Every string inside "arguments" must be valid JSON string content.',
-            '- Escape embedded double quotes as \\\", backslashes as \\\\, and newlines as \\n.',
-            '- Example: {"name":"write_file","arguments":{"path":"/tmp/a.py","content":"print(\\\"hi\\\")\\n"}}',
+            "You are acting as the backend LLM for a local OpenAI-compatible chat gateway.",
+            "Continue this conversation naturally and follow the system/user/tool messages.",
         ]
+        if output_protocol in {"anthropic", "openai"}:
+            parts.extend(
+                [
+                    "Return EXACTLY ONE JSON object and nothing else.",
+                    "Do NOT output markdown code fences.",
+                    "Do NOT output explanatory text before/after JSON.",
+                    'Required output schema: {"content":"string","tool_calls":[{"name":"string","arguments":{},"id":"string"}]}',
+                    "When no tool is needed: set tool_calls to [].",
+                    "When tool is needed: put calls in tool_calls and keep content concise (or empty string).",
+                    "tool_calls[*].arguments MUST be a JSON object (not a string).",
+                    "Tool names and arguments MUST exactly match the provided tools schema.",
+                    "Never fabricate placeholder ids/names/arguments (e.g. call_abc123, name:string, arguments:{}).",
+                    "If you are not sure parameters are valid, do not call tools; respond in content only.",
+                ]
+            )
         if self.sticky_marker:
             parts.append(f"Session marker: {self.sticky_marker}")
         if tools:
-            parts.append("Available tools:")
+            parts.append("Available tools (OpenAI tools schema):")
             parts.append(json.dumps(tools, ensure_ascii=False, indent=2))
         else:
             parts.append("No tools are available for this request.")
@@ -1489,26 +1904,29 @@ class DeepSeekWebBridge:
         *,
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]],
+        output_protocol: str = "openai",
     ) -> str:
         parts = [
             "Continue the existing DeerFlow session already initialized in this chat.",
-            "Return exactly one JSON object with this schema:",
-            '{"content":"string","tool_calls":[{"name":"string","arguments":{},"id":"string"}]}',
-            "Rules:",
-            "- Return JSON only.",
-            '- If no tool call is needed, set "tool_calls" to [].',
-            '- If a tool call is needed, content may be empty.',
-            "- Do not use markdown fences.",
             "- Follow the previously established DeerFlow system instructions already present in this conversation.",
-            '- Use a normal "arguments" object for tool calls.',
-            '- Every string inside "arguments" must be valid JSON string content.',
-            '- Escape embedded double quotes as \\\", backslashes as \\\\, and newlines as \\n.',
-            '- Example: {"name":"write_file","arguments":{"path":"/tmp/a.py","content":"print(\\\"hi\\\")\\n"}}',
         ]
+        if output_protocol in {"anthropic", "openai"}:
+            parts[1:1] = [
+                "Return EXACTLY ONE JSON object and nothing else.",
+                "Do NOT output markdown code fences.",
+                "Do NOT output explanatory text before/after JSON.",
+                'Required output schema: {"content":"string","tool_calls":[{"name":"string","arguments":{},"id":"string"}]}',
+                "When no tool is needed: set tool_calls to [].",
+                "When tool is needed: put calls in tool_calls and keep content concise (or empty string).",
+                "tool_calls[*].arguments MUST be a JSON object (not a string).",
+                "Tool names and arguments MUST exactly match the provided tools schema.",
+                "Never fabricate placeholder ids/names/arguments (e.g. call_abc123, name:string, arguments:{}).",
+                "If you are not sure parameters are valid, do not call tools; respond in content only.",
+            ]
         if self.sticky_marker:
             parts.append(f"Confirmed session marker: {self.sticky_marker}")
         if tools:
-            parts.append("Available tools for this turn:")
+            parts.append("Available tools for this turn (OpenAI tools schema):")
             parts.append(json.dumps(tools, ensure_ascii=False, indent=2))
         parts.append("New conversation events since the previous request:")
         for message in messages:
@@ -1516,26 +1934,222 @@ class DeepSeekWebBridge:
             parts.append(f"[{role}]\n{json.dumps(message, ensure_ascii=False, indent=2)}")
         return "\n\n".join(parts)
 
+    def _normalize_tool_calls(self, raw_tool_calls: Any) -> list[dict[str, Any]]:
+        normalized_tool_calls: list[dict[str, Any]] = []
+        if not isinstance(raw_tool_calls, list):
+            return normalized_tool_calls
+
+        for item in raw_tool_calls:
+            if not isinstance(item, dict):
+                continue
+
+            function = item.get("function")
+            if isinstance(function, dict):
+                name = function.get("name")
+                arguments = function.get("arguments", {})
+                call_id = item.get("id")
+            else:
+                name = item.get("name")
+                arguments = item.get("arguments", {})
+                call_id = item.get("id")
+
+            normalized_name = normalize_tool_name(name)
+            if not normalized_name:
+                continue
+
+            if isinstance(arguments, str):
+                try:
+                    parsed_arguments = json.loads(arguments)
+                    if isinstance(parsed_arguments, dict):
+                        arguments = parsed_arguments
+                    else:
+                        arguments = {}
+                except Exception:
+                    arguments = {}
+            elif not isinstance(arguments, dict):
+                arguments = {}
+
+            normalized_tool_calls.append(
+                {
+                    "id": call_id or f"call_{uuid.uuid4().hex[:12]}",
+                    "name": normalized_name,
+                    "arguments": arguments,
+                }
+            )
+        return normalized_tool_calls
+
+    def _normalize_single_tool_call_payload(self, payload: dict[str, Any]) -> list[dict[str, Any]]:
+        """Accept Claude/OpenCode style single-tool JSON and convert to OpenAI tool_calls."""
+        if not isinstance(payload, dict):
+            return []
+        if isinstance(payload.get("tool_calls"), list):
+            return []
+
+        raw_name: Any = payload.get("tool") or payload.get("name") or payload.get("function_name")
+        raw_arguments: Any = payload.get("arguments", payload.get("input"))
+        raw_id: Any = payload.get("id")
+
+        if raw_name is None and isinstance(payload.get("function"), dict):
+            function = payload["function"]
+            raw_name = function.get("name")
+            raw_arguments = function.get("arguments", raw_arguments)
+
+        name = normalize_tool_name(raw_name)
+        if not name:
+            return []
+
+        arguments = raw_arguments if isinstance(raw_arguments, dict) else {}
+        if isinstance(raw_arguments, str):
+            try:
+                parsed_arguments = json.loads(raw_arguments)
+                if isinstance(parsed_arguments, dict):
+                    arguments = parsed_arguments
+            except Exception:
+                arguments = {}
+
+        if not isinstance(arguments, dict):
+            arguments = {}
+
+        call_id = raw_id if isinstance(raw_id, str) and raw_id else f"call_{uuid.uuid4().hex[:12]}"
+        return [{"id": call_id, "name": name, "arguments": arguments}]
+
+    def _extract_single_tool_call_from_content_text(self, content: str) -> list[dict[str, Any]]:
+        if not isinstance(content, str):
+            return []
+        text = content.strip()
+        if not text:
+            return []
+
+        # Case 1: fenced JSON block
+        for match in re.finditer(r"```(?:json)?\s*([\s\S]*?)\s*```", text, re.IGNORECASE):
+            block = (match.group(1) or "").strip()
+            if not block:
+                continue
+            parsed = load_jsonish_object(block)
+            if isinstance(parsed, dict):
+                normalized = self._normalize_single_tool_call_payload(parsed)
+                if normalized:
+                    return normalized
+
+        # Case 2: plain JSON object
+        parsed_inline = load_jsonish_object(text)
+        if isinstance(parsed_inline, dict):
+            normalized = self._normalize_single_tool_call_payload(parsed_inline)
+            if normalized:
+                return normalized
+
+        # Case 3: function-call style text, e.g. read_file({...})
+        name_matches = list(re.finditer(r"([A-Za-z_][A-Za-z0-9_-]*)\s*\(", text))
+        for name_match in reversed(name_matches):
+            name = name_match.group(1)
+            cursor = name_match.end()
+            while cursor < len(text) and text[cursor].isspace():
+                cursor += 1
+            if cursor >= len(text) or text[cursor] != "{":
+                continue
+            block = _extract_balanced_jsonish_block(text, cursor)
+            if block is None:
+                continue
+            arguments_blob, after = block
+            tail = text[after:].lstrip()
+            if not tail.startswith(")"):
+                continue
+            arguments = load_jsonish_object(arguments_blob)
+            payload = {"tool": name, "arguments": arguments if isinstance(arguments, dict) else {}}
+            normalized = self._normalize_single_tool_call_payload(payload)
+            if normalized:
+                return normalized
+
+        return []
+
+    def _payload_dict_to_output(self, payload: dict[str, Any], raw_text: str) -> dict[str, Any]:
+        if "choices" in payload and isinstance(payload.get("choices"), list):
+            for choice in payload.get("choices", []):
+                if not isinstance(choice, dict):
+                    continue
+
+                message = choice.get("message")
+                if isinstance(message, dict):
+                    content = normalize_text_content(message.get("content", ""))
+                    return {
+                        "content": content,
+                        "tool_calls": self._normalize_tool_calls(message.get("tool_calls")),
+                        "raw_text": raw_text,
+                    }
+
+                delta = choice.get("delta")
+                if isinstance(delta, dict):
+                    content = normalize_text_content(delta.get("content", ""))
+                    return {
+                        "content": content,
+                        "tool_calls": self._normalize_tool_calls(delta.get("tool_calls")),
+                        "raw_text": raw_text,
+                    }
+
+        if "message" in payload and isinstance(payload.get("message"), dict):
+            message = payload["message"]
+            return {
+                "content": normalize_text_content(message.get("content", "")),
+                "tool_calls": self._normalize_tool_calls(message.get("tool_calls")),
+                "raw_text": raw_text,
+            }
+
+        single_tool_calls = self._normalize_single_tool_call_payload(payload)
+        if single_tool_calls:
+            content = payload.get("content", "")
+            return {
+                "content": content if isinstance(content, str) else normalize_text_content(content),
+                "tool_calls": single_tool_calls,
+                "raw_text": raw_text,
+            }
+
+        if "content" in payload or "tool_calls" in payload:
+            content = payload.get("content", "")
+            normalized_tool_calls = self._normalize_tool_calls(payload.get("tool_calls"))
+            if not normalized_tool_calls and isinstance(content, str):
+                normalized_tool_calls = self._extract_single_tool_call_from_content_text(content)
+                if normalized_tool_calls:
+                    content = ""
+            if isinstance(content, str):
+                stripped = content.strip()
+                if stripped.startswith("{") and '"tool_calls"' in stripped:
+                    content = ""
+            return {
+                "content": content if isinstance(content, str) else normalize_text_content(content),
+                "tool_calls": normalized_tool_calls,
+                "raw_text": raw_text,
+            }
+
+        return {
+            "content": normalize_text_content(payload),
+            "tool_calls": [],
+            "raw_text": raw_text,
+        }
+
     def submit_prompt(
         self,
         *,
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]],
+        thinking_enabled: bool | None = None,
+        output_protocol: str = "openai",
         trace: DeepSeekTrace | None = None,
     ) -> str:
         if trace is not None:
             trace.mark("context_ready")
         with self._lock:
+            self._switch_session_if_needed()
             if self.force_new_chat:
                 self.reset_page()
-                self._sticky_initialized = False
-                self._sticky_last_messages = []
-                self._sticky_messages_since_full = 0
+                self._clear_session_runtime_state()
             page = self.ensure_page()
             if trace is not None:
                 trace.mark("page_created")
             try:
                 self.ensure_chat_ready(page, trace=trace)
+                thinking_result = self.sync_thinking_mode(page, thinking_enabled, trace=trace)
+                if trace is not None:
+                    trace.set("thinking_sync_error", thinking_result.get("error"))
                 if self.force_new_chat:
                     if trace is not None:
                         trace.set("new_chat_selector", "fresh_page")
@@ -1576,7 +2190,7 @@ class DeepSeekWebBridge:
                 elif trace is not None:
                     trace.set("sticky_mode", "full_init" if self.sticky_marker else "stateless")
 
-                prompt = prompt_builder(messages=prompt_messages, tools=tools)
+                prompt = prompt_builder(messages=prompt_messages, tools=tools, output_protocol=output_protocol)
                 try:
                     input_box = self.first_visible(page, self.input_selectors)
                 except RuntimeError:
@@ -1626,21 +2240,47 @@ class DeepSeekWebBridge:
                         transport_capture=transport_capture,
                         trace=trace,
                     )
+                    if trace is not None:
+                        trace.mark("response_wait_done")
                     self._refresh_current_chat_url(page)
-                    copied_text = self.try_copy_last_assistant_text(page)
-                    if copied_text and (
-                        looks_like_tool_payload(copied_text)
-                        or len(copied_text) >= len(response_text)
-                    ):
+                    if trace is not None:
+                        trace.mark("chat_url_refreshed")
+                    copy_probe_started = time.perf_counter()
+                    if trace is not None:
+                        trace.mark("copy_probe_started")
+                        trace.set("copy_probe_budget_ms", self.copy_probe_max_ms)
+                    copied_text = self.try_copy_last_assistant_text(page, max_total_ms=self.copy_probe_max_ms)
+                    if trace is not None:
+                        trace.set("copy_probe_ms", int((time.perf_counter() - copy_probe_started) * 1000))
+                        trace.set("copy_probe_used", bool(copied_text))
+                        trace.mark("copy_probe_done")
+                    response_has_payload = looks_like_assistant_payload_candidate(response_text)
+                    copied_has_payload = looks_like_assistant_payload_candidate(copied_text) if copied_text else False
+                    should_replace_with_copy = False
+                    if copied_text:
+                        if not str(response_text or "").strip():
+                            should_replace_with_copy = True
+                        elif copied_has_payload and not response_has_payload:
+                            should_replace_with_copy = True
+                        elif not response_has_payload and len(copied_text) >= len(response_text):
+                            should_replace_with_copy = True
+                    if copied_text and should_replace_with_copy:
                         if trace is not None:
                             trace.set("response_chars", len(copied_text))
                             trace.set("response_ready_reason", "copy_button_post_wait")
+                            trace.set("copy_replace_response_has_payload", response_has_payload)
+                            trace.set("copy_replace_copied_has_payload", copied_has_payload)
+                            trace.mark("submit_prompt_return")
                         logger.warning(
-                            "DeepSeek submit_prompt replacing response with clipboard copy response_chars=%d copied_chars=%d",
+                            "DeepSeek submit_prompt replacing response with clipboard copy response_chars=%d copied_chars=%d response_has_payload=%s copied_has_payload=%s",
                             len(response_text),
                             len(copied_text),
+                            response_has_payload,
+                            copied_has_payload,
                         )
                         return copied_text
+                    if trace is not None:
+                        trace.mark("submit_prompt_return")
                     return response_text
                 finally:
                     self._save_session_state()
@@ -1650,9 +2290,32 @@ class DeepSeekWebBridge:
                 raise
 
     def parse_model_payload(self, raw_text: str) -> dict[str, Any]:
-        try:
-            payload = extract_json_object(raw_text)
-        except Exception:
+        payload: dict[str, Any] | None = None
+        stripped = raw_text.strip()
+
+        # Guardrail: never surface our own injected bridge prompt as assistant output.
+        if is_prompt_replay_text(stripped):
+            logger.warning("DeepSeek parse_model_payload suppressed prompt-replay text from model output path.")
+            return {"content": "", "tool_calls": [], "raw_text": raw_text}
+        if is_placeholder_assistant_payload_text(stripped):
+            logger.warning("DeepSeek parse_model_payload suppressed placeholder schema payload from model output.")
+            return {"content": "", "tool_calls": [], "raw_text": raw_text}
+
+        if stripped.startswith("{"):
+            try:
+                parsed_direct = json.loads(stripped)
+                if isinstance(parsed_direct, dict):
+                    payload = parsed_direct
+            except Exception:
+                payload = None
+
+        if payload is None:
+            try:
+                payload = extract_json_object(raw_text)
+            except Exception:
+                payload = None
+
+        if payload is None:
             salvaged = salvage_tool_calls_payload(raw_text)
             if salvaged is not None:
                 try:
@@ -1676,46 +2339,11 @@ class DeepSeekWebBridge:
                 INVALID_PAYLOAD_DEBUG_PATH,
                 raw_text.strip()[:800],
             )
-            stripped = raw_text.strip()
             if stripped.startswith("{") and '"tool_calls"' in stripped:
                 return {"content": "", "tool_calls": [], "raw_text": raw_text}
             return {"content": stripped, "tool_calls": [], "raw_text": raw_text}
 
-        normalized_tool_calls = []
-        for item in payload.get("tool_calls", []) or []:
-            if not isinstance(item, dict):
-                continue
-            name = item.get("name")
-            if not name:
-                continue
-            arguments = item.get("arguments", {})
-            if not isinstance(arguments, dict):
-                try:
-                    parsed_arguments = json.loads(arguments)
-                    if isinstance(parsed_arguments, dict):
-                        arguments = parsed_arguments
-                    else:
-                        arguments = {}
-                except Exception:
-                    arguments = {}
-            normalized_tool_calls.append(
-                {
-                    "id": item.get("id") or f"call_{uuid.uuid4().hex[:12]}",
-                    "name": name,
-                    "arguments": arguments,
-                }
-            )
-
-        content = payload.get("content", "")
-        if isinstance(content, str):
-            stripped = content.strip()
-            if stripped.startswith("{") and '"tool_calls"' in stripped:
-                content = ""
-        return {
-            "content": content if isinstance(content, str) else normalize_text_content(content),
-            "tool_calls": normalized_tool_calls,
-            "raw_text": raw_text,
-        }
+        return self._payload_dict_to_output(payload, raw_text)
 
     def assistant_locator(self, page: Page) -> Locator:
         return page.locator(", ".join(self.assistant_selectors))
@@ -1861,7 +2489,7 @@ class DeepSeekWebBridge:
         if candidate is None:
             return {"source": "assistant", "index": -1, "text": ""}
         text = candidate.get("text", "") or ""
-        if is_schema_example_payload_text(text) or any(marker in text for marker in PROMPT_REPLAY_MARKERS):
+        if is_schema_example_payload_text(text) or is_prompt_replay_text(text):
             return {"source": "assistant", "index": -1, "text": ""}
         return {
             "source": "assistant",
@@ -2086,11 +2714,28 @@ class DeepSeekWebBridge:
             return []
         return [item.strip() for item in result if isinstance(item, str) and item.strip()] if isinstance(result, list) else []
 
-    def try_copy_last_assistant_text(self, page: Page) -> str:
+    def try_copy_last_assistant_text(self, page: Page, *, max_total_ms: int | None = None) -> str:
+        budget_ms = self.copy_probe_max_ms if max_total_ms is None else max(0, int(max_total_ms))
+        deadline = time.perf_counter() + (budget_ms / 1000.0) if budget_ms > 0 else None
+
+        def timed_out() -> bool:
+            return deadline is not None and time.perf_counter() >= deadline
+
+        def wait_with_budget(default_ms: int) -> None:
+            if deadline is None:
+                page.wait_for_timeout(default_ms)
+                return
+            remaining_ms = int((deadline - time.perf_counter()) * 1000)
+            if remaining_ms <= 0:
+                return
+            page.wait_for_timeout(min(default_ms, remaining_ms))
+
         try:
             page.evaluate(COPY_CAPTURE_INIT_SCRIPT)
         except Exception:
             logger.debug("Failed to reinstall DeepSeek copy capture before clicking copy.", exc_info=True)
+        if timed_out():
+            return ""
         self.scroll_chat_to_bottom(page)
         self.reset_copy_capture(page)
         attempts: list[dict[str, Any]] = []
@@ -2141,15 +2786,29 @@ class DeepSeekWebBridge:
                         continue
                     target = locator.nth(target_index)
                 target.hover(timeout=1500)
-                page.wait_for_timeout(150)
+                wait_with_budget(150)
             except Exception:
                 logger.debug("Failed to hover candidate DeepSeek assistant message before copy.", exc_info=True)
                 continue
+            if timed_out():
+                break
 
             copy_button_candidates = self.inspect_copy_button_candidates(target, limit=24)
             for candidate in copy_button_candidates:
+                if timed_out():
+                    break
                 probe_id = candidate.get("probeId")
                 if not isinstance(probe_id, str):
+                    continue
+                distance = candidate.get("distance")
+                try:
+                    normalized_distance = int(distance)
+                except Exception:
+                    normalized_distance = 0
+                if (
+                    self.copy_candidate_max_distance > 0
+                    and normalized_distance > self.copy_candidate_max_distance
+                ):
                     continue
                 hover_texts = self.read_hover_texts_near_candidate(page, probe_id)
                 for hover_text in hover_texts:
@@ -2181,7 +2840,7 @@ class DeepSeekWebBridge:
                 try:
                     button = page.locator(f'[data-deerflow-probe-id="{probe_id}"]').first
                     button.click(timeout=1500)
-                    page.wait_for_timeout(600)
+                    wait_with_budget(600)
                 except Exception:
                     logger.debug("Failed to click DeepSeek copy candidate.", exc_info=True)
                     continue
@@ -2241,7 +2900,7 @@ class DeepSeekWebBridge:
             return ""
         if is_schema_example_payload_text(fallback):
             return ""
-        if any(marker in fallback for marker in PROMPT_REPLAY_MARKERS):
+        if is_prompt_replay_text(fallback):
             return ""
         return fallback
 
@@ -2425,6 +3084,10 @@ class DeepSeekWebBridge:
         stable_transport_seen = 0
         last_transport_text = ""
         tool_payload_stable_rounds = max(self.stable_rounds, 10)
+        placeholder_wait_rounds = 0
+        placeholder_wait_limit = max(self.stable_rounds * 4, 10)
+        short_fragment_copy_retry_done = False
+        short_fragment_extra_wait_rounds = 0
 
         def assistant_has_advanced(current_count: int, current_index: int, current_text: str) -> bool:
             if self.force_new_chat:
@@ -2444,8 +3107,19 @@ class DeepSeekWebBridge:
         while time.time() < deadline:
             self.scroll_chat_to_bottom(page)
             transport_text = transport_capture.best_payload_text() if transport_capture is not None else ""
+            if transport_text and is_prompt_replay_text(transport_text):
+                # Transport channel can occasionally include echoed request-side prompt;
+                # skip these candidates and continue waiting for real assistant content.
+                transport_text = ""
             if transport_text:
                 if is_assistant_payload_text(transport_text):
+                    if is_placeholder_assistant_payload_text(transport_text):
+                        if placeholder_wait_rounds < placeholder_wait_limit:
+                            placeholder_wait_rounds += 1
+                            page.wait_for_timeout(min(self.stable_poll_interval_ms, 200))
+                            continue
+                        logger.warning("DeepSeek wait_for_response suppressing placeholder transport payload after retries.")
+                        return '{"content":"","tool_calls":[]}'
                     if trace is not None:
                         trace.set("response_chars", len(transport_text))
                         trace.set("response_ready_reason", "transport_assistant_payload")
@@ -2487,6 +3161,13 @@ class DeepSeekWebBridge:
                 if has_advanced:
                     try:
                         extract_json_object(current)
+                        if is_placeholder_assistant_payload_text(current):
+                            if placeholder_wait_rounds < placeholder_wait_limit:
+                                placeholder_wait_rounds += 1
+                                page.wait_for_timeout(min(self.stable_poll_interval_ms, 200))
+                                continue
+                            logger.warning("DeepSeek wait_for_response suppressing placeholder json payload after retries.")
+                            return '{"content":"","tool_calls":[]}'
                         if trace is not None:
                             trace.set("response_chars", len(current))
                             trace.set("response_ready_reason", "json_parseable")
@@ -2523,6 +3204,16 @@ class DeepSeekWebBridge:
                 )
                 last_progress_log = now
             if transport_text and stable_transport_seen >= self.stable_rounds:
+                if is_prompt_replay_text(transport_text):
+                    page.wait_for_timeout(min(self.stable_poll_interval_ms, 200))
+                    continue
+                if is_placeholder_assistant_payload_text(transport_text):
+                    if placeholder_wait_rounds < placeholder_wait_limit:
+                        placeholder_wait_rounds += 1
+                        page.wait_for_timeout(min(self.stable_poll_interval_ms, 200))
+                        continue
+                    logger.warning("DeepSeek wait_for_response suppressing stable placeholder transport payload.")
+                    return '{"content":"","tool_calls":[]}'
                 if trace is not None:
                     trace.set("response_chars", len(transport_text))
                     trace.set("response_ready_reason", "transport_stable_text")
@@ -2530,6 +3221,39 @@ class DeepSeekWebBridge:
                     trace.mark("response_stable")
                 return transport_text
             if has_advanced and current and stable_seen >= self.stable_rounds:
+                if is_placeholder_assistant_payload_text(current):
+                    if placeholder_wait_rounds < placeholder_wait_limit:
+                        placeholder_wait_rounds += 1
+                        page.wait_for_timeout(min(self.stable_poll_interval_ms, 200))
+                        continue
+                    logger.warning("DeepSeek wait_for_response suppressing stable placeholder payload.")
+                    return '{"content":"","tool_calls":[]}'
+                if is_suspicious_short_fragment(current):
+                    if self.can_submit_next_turn(page) and not short_fragment_copy_retry_done:
+                        copied = self.try_copy_last_assistant_text(
+                            page, max_total_ms=max(self.copy_probe_max_ms * 3, 1200)
+                        )
+                        short_fragment_copy_retry_done = True
+                        if copied:
+                            if trace is not None:
+                                trace.set("response_chars", len(copied))
+                                trace.set("response_ready_reason", "copy_button_short_fragment_retry")
+                                trace.mark("response_stable")
+                            logger.warning(
+                                "DeepSeek wait_for_response recovered short fragment via copy retry fragment=%r copied_chars=%d",
+                                current[:40],
+                                len(copied),
+                            )
+                            return copied
+                    if short_fragment_extra_wait_rounds < max(self.stable_rounds * 4, 10):
+                        short_fragment_extra_wait_rounds += 1
+                        logger.warning(
+                            "DeepSeek wait_for_response postponing suspicious short fragment fragment=%r round=%d",
+                            current[:40],
+                            short_fragment_extra_wait_rounds,
+                        )
+                        page.wait_for_timeout(min(self.stable_poll_interval_ms, 200))
+                        continue
                 if looks_like_assistant_payload_candidate(current):
                     copied = self.try_copy_last_assistant_text(page)
                     if copied:

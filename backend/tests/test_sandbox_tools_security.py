@@ -5,6 +5,7 @@ from unittest.mock import patch
 
 import pytest
 
+from deerflow.sandbox.local.local_sandbox import LocalSandbox
 from deerflow.sandbox.tools import (
     VIRTUAL_PATH_PREFIX,
     _apply_cwd_prefix,
@@ -179,6 +180,18 @@ def test_validate_local_tool_path_allows_user_data_paths() -> None:
     validate_local_tool_path(f"{VIRTUAL_PATH_PREFIX}/outputs/result.csv", _THREAD_DATA)
 
 
+def test_validate_local_tool_path_allows_bound_host_workspace_path(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    thread_data = {
+        "workspace_path": str(workspace),
+        "uploads_path": str(tmp_path / "uploads"),
+        "outputs_path": str(tmp_path / "outputs"),
+    }
+
+    validate_local_tool_path(str(workspace / "src" / "main.py"), thread_data, read_only=True)
+
+
 def test_validate_local_tool_path_allows_user_data_write() -> None:
     # read_only=False (default) should still work for user-data paths
     validate_local_tool_path(f"{VIRTUAL_PATH_PREFIX}/workspace/file.txt", _THREAD_DATA, read_only=False)
@@ -254,6 +267,20 @@ def test_resolve_and_validate_user_data_path_resolves_correctly(tmp_path: Path) 
     assert resolved == str(workspace / "hello.txt")
 
 
+def test_resolve_and_validate_user_data_path_accepts_bound_host_workspace_path(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    thread_data = {
+        "workspace_path": str(workspace),
+        "uploads_path": str(tmp_path / "uploads"),
+        "outputs_path": str(tmp_path / "outputs"),
+    }
+
+    resolved = _resolve_and_validate_user_data_path(str(workspace / "hello.txt"), thread_data)
+
+    assert resolved == str(workspace / "hello.txt")
+
+
 def test_resolve_and_validate_user_data_path_blocks_traversal(tmp_path: Path) -> None:
     """Even after resolution, path must stay within allowed roots."""
     workspace = tmp_path / "workspace"
@@ -312,6 +339,48 @@ def test_read_file_tool_reads_convertible_workspace_document_via_cached_markdown
     )
 
     assert "# Converted Report" in content
+    assert "Hello PDF" in content
+
+
+def test_read_file_tool_reads_convertible_bound_host_workspace_document(tmp_path: Path, monkeypatch) -> None:
+    workspace = tmp_path / "project"
+    workspace.mkdir()
+    pdf_path = workspace / "report.pdf"
+    pdf_path.write_bytes(b"%PDF-pretend")
+
+    runtime = SimpleNamespace(
+        state={
+            "thread_data": {
+                "workspace_path": str(workspace),
+                "uploads_path": str(tmp_path / "uploads"),
+                "outputs_path": str(tmp_path / "outputs"),
+            }
+        },
+        context={"thread_id": "thread-123"},
+        config={},
+    )
+
+    class FailingSandbox:
+        def read_file(self, path: str) -> str:
+            raise AssertionError("read_file should use document conversion for PDFs")
+
+    monkeypatch.setattr("deerflow.sandbox.tools.ensure_sandbox_initialized", lambda runtime: FailingSandbox())
+    monkeypatch.setattr("deerflow.sandbox.tools.ensure_thread_directories_exist", lambda runtime: None)
+    monkeypatch.setattr("deerflow.sandbox.tools.is_local_sandbox", lambda runtime: False)
+    monkeypatch.setattr(
+        "deerflow.sandbox.tools.get_paths",
+        lambda: SimpleNamespace(sandbox_work_dir=lambda thread_id: tmp_path / "thread-workspace"),
+    )
+    monkeypatch.setattr("deerflow.sandbox.tools._do_convert", lambda file_path, pdf_converter: "# Converted Host Report\n\nHello PDF")
+    monkeypatch.setattr("deerflow.sandbox.tools._get_pdf_converter", lambda: "auto")
+
+    content = read_file_tool.func(
+        runtime=runtime,
+        description="Read the host-bound PDF",
+        path=str(pdf_path),
+    )
+
+    assert "# Converted Host Report" in content
     assert "Hello PDF" in content
 
 
@@ -375,6 +444,18 @@ def test_validate_local_bash_command_paths_allows_virtual_and_system_paths() -> 
     )
 
 
+def test_validate_local_bash_command_paths_allows_bound_host_workspace_paths(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    thread_data = {
+        "workspace_path": str(workspace),
+        "uploads_path": str(tmp_path / "uploads"),
+        "outputs_path": str(tmp_path / "outputs"),
+    }
+
+    validate_local_bash_command_paths(f"ls {workspace} && cat {workspace / 'README.md'}", thread_data)
+
+
 def test_validate_local_bash_command_paths_blocks_traversal_in_user_data() -> None:
     """Bash commands with traversal in user-data paths should be blocked."""
     with pytest.raises(PermissionError, match="path traversal"):
@@ -413,6 +494,48 @@ def test_bash_tool_rejects_host_bash_when_local_sandbox_default(monkeypatch) -> 
     )
 
     assert "Host bash execution is disabled" in result
+
+
+def test_bash_tool_python_process_can_write_virtual_outputs_path(monkeypatch, tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    script_path = workspace / "emit_report.py"
+    script_path.write_text(
+        "\n".join(
+            [
+                "from pathlib import Path",
+                "",
+                "Path('/mnt/user-data/outputs').mkdir(parents=True, exist_ok=True)",
+                "Path('/mnt/user-data/outputs/alpha17_report.json').write_text('{\"status\":\"ok\"}', encoding='utf-8')",
+                "print(Path('/mnt/user-data/outputs/alpha17_report.json').read_text(encoding='utf-8'))",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    thread_data = {
+        "workspace_path": str(workspace),
+        "uploads_path": str(tmp_path / "uploads"),
+        "outputs_path": str(tmp_path / "outputs"),
+    }
+    runtime = SimpleNamespace(
+        state={"sandbox": {"sandbox_id": "local"}, "thread_data": thread_data},
+        context={"thread_id": "thread-1"},
+        config={},
+    )
+    sandbox = LocalSandbox("local")
+
+    monkeypatch.setattr("deerflow.sandbox.tools.ensure_sandbox_initialized", lambda runtime: sandbox)
+    monkeypatch.setattr("deerflow.sandbox.tools.is_host_bash_allowed", lambda: True)
+
+    result = bash_tool.func(
+        runtime=runtime,
+        description="run python script that writes to virtual outputs",
+        command="python3 /mnt/user-data/workspace/emit_report.py",
+    )
+
+    assert '{"status":"ok"}' in result
+    assert (tmp_path / "outputs" / "alpha17_report.json").read_text(encoding="utf-8") == '{"status":"ok"}'
 
 
 # ---------- Skills path tests ----------
@@ -1066,3 +1189,35 @@ def test_str_replace_and_append_on_same_path_should_preserve_both_updates(monkey
 
     assert failures == []
     assert sandbox.content == "ALPHA\ntail\n"
+
+
+def test_write_file_to_outputs_auto_adds_artifact(monkeypatch) -> None:
+    class RecordingSandbox:
+        def __init__(self) -> None:
+            self.writes: list[tuple[str, str, bool]] = []
+
+        def write_file(self, path: str, content: str, append: bool = False) -> None:
+            self.writes.append((path, content, append))
+
+    sandbox = RecordingSandbox()
+    runtime = SimpleNamespace(
+        state={"thread_data": _THREAD_DATA},
+        context={"thread_id": "thread-1"},
+        config={},
+    )
+
+    monkeypatch.setattr("deerflow.sandbox.tools.ensure_sandbox_initialized", lambda runtime: sandbox)
+    monkeypatch.setattr("deerflow.sandbox.tools.ensure_thread_directories_exist", lambda runtime: None)
+    monkeypatch.setattr("deerflow.sandbox.tools.is_local_sandbox", lambda runtime: False)
+
+    result = write_file_tool.func(
+        runtime=runtime,
+        description="写出报告",
+        path="/mnt/user-data/outputs/report.md",
+        content="# report",
+        tool_call_id="tc-output-1",
+    )
+
+    assert sandbox.writes == [("/mnt/user-data/outputs/report.md", "# report", False)]
+    assert result.update["artifacts"] == ["/mnt/user-data/outputs/report.md"]
+    assert result.update["messages"][0].content == "OK"

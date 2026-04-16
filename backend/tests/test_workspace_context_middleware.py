@@ -5,7 +5,7 @@ def test_workspace_context_message_defaults_generic_code_requests_to_workspace()
     middleware = WorkspaceContextMiddleware()
 
     message = middleware._build_workspace_message(
-        "/tmp/workspace",
+        "/Users/demo/project",
         "/mnt/project",
         "/tmp/uploads",
         "/tmp/outputs",
@@ -13,6 +13,8 @@ def test_workspace_context_message_defaults_generic_code_requests_to_workspace()
 
     content = str(message.content)
     assert "Preferred workspace tool path: `/mnt/project`" in content
+    assert "Do not use host-machine paths" in content
+    assert "/Users/demo/project" not in content
     assert "materials already available in this thread" in content
     assert "Treat uploads as a secondary location" in content
     assert "supported PDFs and Office files can be read with `read_file`" in content

@@ -3,11 +3,13 @@
 import asyncio
 from unittest.mock import MagicMock
 
+from langchain.agents.middleware.types import ModelRequest
 from langchain_core.messages import AIMessage, HumanMessage
 
 from deerflow.agents.middlewares.todo_middleware import (
     TodoMiddleware,
     _format_todos,
+    _is_complex_request,
     _reminder_in_messages,
     _todos_in_messages,
 )
@@ -96,6 +98,24 @@ class TestBeforeModel:
         state = {"messages": [HumanMessage(content="hi")], "todos": []}
         assert mw.before_model(state, _make_runtime()) is None
 
+    def test_bootstrap_reminder_for_complex_request_without_todos(self):
+        mw = TodoMiddleware()
+        state = {
+            "messages": [HumanMessage(content="请按步骤修改三个文件，然后回读确认并总结")],
+            "todos": [],
+        }
+        result = mw.before_model(state, _make_runtime())
+        assert result is not None
+        assert result["messages"][0].name == "todo_bootstrap_reminder"
+
+    def test_no_bootstrap_for_simple_read_only_request(self):
+        mw = TodoMiddleware()
+        state = {
+            "messages": [HumanMessage(content="看下这个目录有哪些文件")],
+            "todos": [],
+        }
+        assert mw.before_model(state, _make_runtime()) is None
+
     def test_returns_none_when_todos_is_none(self):
         mw = TodoMiddleware()
         state = {"messages": [HumanMessage(content="hi")], "todos": None}
@@ -154,3 +174,65 @@ class TestAbeforeModel:
         result = asyncio.run(mw.abefore_model(state, _make_runtime()))
         assert result is not None
         assert result["messages"][0].name == "todo_reminder"
+
+
+class TestWrapModelCall:
+    def test_force_required_tool_choice_for_complex_task_without_todos(self):
+        mw = TodoMiddleware()
+        captured = {}
+
+        request = ModelRequest(
+            model=MagicMock(),
+            system_prompt=None,
+            messages=[HumanMessage(content="1. 修改代码\n2. 更新测试\n3. 回读确认")],
+            tool_choice=None,
+            tools=[{"type": "function", "function": {"name": "write_todos"}}],
+            state={"messages": [HumanMessage(content="1. 修改代码\n2. 更新测试\n3. 回读确认")], "todos": []},
+            runtime=MagicMock(),
+            model_settings={},
+        )
+
+        def _handler(req: ModelRequest):
+            captured["tool_choice"] = req.tool_choice
+            return AIMessage(content="")
+
+        mw.wrap_model_call(request, _handler)
+        assert captured["tool_choice"] == "required"
+
+    def test_do_not_force_when_todos_exist(self):
+        mw = TodoMiddleware()
+        captured = {}
+
+        request = ModelRequest(
+            model=MagicMock(),
+            system_prompt=None,
+            messages=[HumanMessage(content="请继续")],
+            tool_choice=None,
+            tools=[{"type": "function", "function": {"name": "write_todos"}}],
+            state={"messages": [HumanMessage(content="请继续")], "todos": _sample_todos()},
+            runtime=MagicMock(),
+            model_settings={},
+        )
+
+        def _handler(req: ModelRequest):
+            captured["tool_choice"] = req.tool_choice
+            return AIMessage(content="")
+
+        mw.wrap_model_call(request, _handler)
+        assert captured["tool_choice"] is None
+
+
+class TestComplexityHeuristic:
+    def test_complex_for_multi_file_edit_and_verify(self):
+        msg = HumanMessage(
+            content=(
+                "在这个工作区里，搜索 calculate_total 的实现和调用点。"
+                "修改 app/calc.py、app/report.py 和 tests/test_calc.py，"
+                "最后回读关键文件并总结。"
+            )
+        )
+        assert _is_complex_request(msg) is True
+
+    def test_not_complex_for_simple_listing(self):
+        msg = HumanMessage(content="列出当前目录文件")
+        assert _is_complex_request(msg) is False

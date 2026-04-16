@@ -102,6 +102,15 @@ export const zhCN: Translations = {
     reasoningEffortHigh: "高",
     reasoningEffortHighDescription: "全维度逻辑推演 + 多路径验证 + 反推校验",
     searchModels: "搜索模型...",
+    contextCompression: "压缩上下文",
+    contextCompressionDescription:
+      "在长对话中自动压缩较早上下文，减少上下文膨胀并帮助模型聚焦当前任务。",
+    skillCommandLabel: "可用技能",
+    skillCommandDescription:
+      "输入 /skill 可筛选已启用技能，点击后会把“优先使用该技能”的指令插入输入框。",
+    skillCommandEmpty: "没有匹配的已启用技能",
+    skillCommandTemplate: (skillName: string, skillDescription: string) =>
+      `请优先使用 skill "${skillName}" 完成这个请求。开始前先读取该 skill 的 SKILL.md，并严格遵循它的工作流。技能说明：${skillDescription}`,
     surpriseMe: "小惊喜",
     surpriseMePrompt: "给我一个小惊喜吧",
     followupLoading: "正在生成可能的后续问题...",

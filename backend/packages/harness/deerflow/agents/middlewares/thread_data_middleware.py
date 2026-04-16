@@ -73,13 +73,46 @@ class ThreadDataMiddleware(AgentMiddleware[ThreadDataMiddlewareState]):
         self._paths.ensure_thread_dirs(thread_id)
         return self._get_thread_paths(thread_id)
 
+    def _merge_thread_data(
+        self,
+        default_paths: dict[str, str],
+        existing_thread_data: ThreadDataState | None,
+        explicit_overrides: dict[str, str],
+    ) -> dict[str, str]:
+        """Merge thread data sources while preserving inherited workspace bindings.
+
+        Precedence:
+        1. computed thread-local defaults
+        2. existing state inherited from the parent agent
+        3. explicit runtime/config overrides for this execution
+        """
+        merged = dict(default_paths)
+
+        if existing_thread_data:
+            for key, value in existing_thread_data.items():
+                if isinstance(value, str) and value.strip():
+                    merged[key] = value
+
+        for key, value in explicit_overrides.items():
+            if isinstance(value, str) and value.strip():
+                merged[key] = value
+
+        return merged
+
     @override
     def before_agent(self, state: ThreadDataMiddlewareState, runtime: Runtime) -> dict | None:
         context = runtime.context or {}
         thread_id = context.get("thread_id")
+        configurable: dict[str, object] = {}
         if thread_id is None:
             config = get_config()
-            thread_id = config.get("configurable", {}).get("thread_id")
+            configurable = config.get("configurable", {})
+            thread_id = configurable.get("thread_id")
+        elif not configurable:
+            try:
+                configurable = get_config().get("configurable", {})
+            except Exception:
+                configurable = {}
 
         if thread_id is None:
             raise ValueError("Thread ID is required in runtime context or config.configurable")
@@ -92,13 +125,19 @@ class ThreadDataMiddleware(AgentMiddleware[ThreadDataMiddlewareState]):
             paths = self._create_thread_directories(thread_id)
             logger.debug("Created thread data directories for thread %s", thread_id)
 
-        selected_workspace = context.get("workspace_path")
-        if isinstance(selected_workspace, str) and selected_workspace.strip():
-            paths["workspace_path"] = selected_workspace
+        explicit_overrides: dict[str, str] = {}
+        for key in ("workspace_path", "workspace_container_path", "uploads_path", "outputs_path"):
+            selected_value = context.get(key)
+            if not isinstance(selected_value, str) or not selected_value.strip():
+                selected_value = configurable.get(key)
+            if isinstance(selected_value, str) and selected_value.strip():
+                explicit_overrides[key] = selected_value
 
-        selected_workspace_container = context.get("workspace_container_path")
-        if isinstance(selected_workspace_container, str) and selected_workspace_container.strip():
-            paths["workspace_container_path"] = selected_workspace_container
+        paths = self._merge_thread_data(
+            default_paths=paths,
+            existing_thread_data=state.get("thread_data"),
+            explicit_overrides=explicit_overrides,
+        )
 
         return {
             "thread_data": {

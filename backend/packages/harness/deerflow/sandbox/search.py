@@ -85,11 +85,45 @@ def should_ignore_path(path: str) -> bool:
 
 
 def path_matches(pattern: str, rel_path: str) -> bool:
+    def expand_brace_patterns(value: str) -> list[str]:
+        # Support simple glob brace expansion like `**/*.{c,cpp,h,hpp}`.
+        start = value.find("{")
+        if start < 0:
+            return [value]
+        depth = 0
+        end = -1
+        for index in range(start, len(value)):
+            char = value[index]
+            if char == "{":
+                depth += 1
+            elif char == "}":
+                depth -= 1
+                if depth == 0:
+                    end = index
+                    break
+        if end < 0:
+            return [value]
+
+        inner = value[start + 1 : end]
+        if not inner:
+            return [value]
+        options = [segment.strip() for segment in inner.split(",") if segment.strip()]
+        if not options:
+            return [value]
+
+        prefix = value[:start]
+        suffix = value[end + 1 :]
+        expanded: list[str] = []
+        for option in options:
+            expanded.extend(expand_brace_patterns(f"{prefix}{option}{suffix}"))
+        return expanded
+
     path = PurePosixPath(rel_path)
-    if path.match(pattern):
-        return True
-    if pattern.startswith("**/"):
-        return path.match(pattern[3:])
+    for expanded_pattern in expand_brace_patterns(pattern):
+        if path.match(expanded_pattern):
+            return True
+        if expanded_pattern.startswith("**/") and path.match(expanded_pattern[3:]):
+            return True
     return False
 
 

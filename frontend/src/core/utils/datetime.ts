@@ -14,13 +14,22 @@ function getDateFnsLocale(locale: Locale) {
   }
 }
 
+function normalizeDateInput(date: Date | string | number): Date | null {
+  const normalized = date instanceof Date ? date : new Date(date);
+  return Number.isNaN(normalized.getTime()) ? null : normalized;
+}
+
 export function formatTimeAgo(date: Date | string | number, locale?: Locale) {
+  const normalizedDate = normalizeDateInput(date);
+  if (!normalizedDate) {
+    return "";
+  }
   const effectiveLocale =
     locale ??
     (getLocaleFromCookie() as Locale | null) ??
     // Fallback when cookie is missing (or on first render)
     detectLocale();
-  return formatDistanceToNow(date, {
+  return formatDistanceToNow(normalizedDate, {
     addSuffix: true,
     locale: getDateFnsLocale(effectiveLocale),
   });

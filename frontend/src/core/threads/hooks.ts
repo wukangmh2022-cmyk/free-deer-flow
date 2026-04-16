@@ -581,6 +581,7 @@ export function useThreadStream({
             threadId: activeThreadId,
             streamSubgraphs: true,
             streamResumable: true,
+            onDisconnect: "continue",
             config: {
               recursion_limit: 1000,
             },

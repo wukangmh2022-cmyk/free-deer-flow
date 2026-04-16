@@ -15,10 +15,11 @@ from deerflow.agents.middlewares.token_usage_middleware import TokenUsageMiddlew
 from deerflow.agents.middlewares.tool_error_handling_middleware import build_lead_runtime_middlewares
 from deerflow.agents.middlewares.view_image_middleware import ViewImageMiddleware
 from deerflow.agents.middlewares.workspace_context_middleware import WorkspaceContextMiddleware
+from deerflow.agents.middlewares.workspace_grounding_middleware import WorkspaceGroundingMiddleware
 from deerflow.agents.thread_state import ThreadState
 from deerflow.config.agents_config import load_agent_config
 from deerflow.config.app_config import get_app_config
-from deerflow.config.summarization_config import get_summarization_config
+from deerflow.config.summarization_config import ContextSize, get_summarization_config
 from deerflow.models import create_chat_model
 
 logger = logging.getLogger(__name__)
@@ -39,27 +40,40 @@ def _resolve_model_name(requested_model_name: str | None = None) -> str:
     return default_model_name
 
 
-def _create_summarization_middleware() -> SummarizationMiddleware | None:
+def _create_summarization_middleware(config: RunnableConfig) -> SummarizationMiddleware | None:
     """Create and configure the summarization middleware from config."""
-    config = get_summarization_config()
+    summarization_config = get_summarization_config()
+    runtime_override = config.get("configurable", {}).get(
+        "context_compression_enabled",
+    )
 
-    if not config.enabled:
+    if isinstance(runtime_override, bool):
+        enabled = runtime_override
+    else:
+        enabled = summarization_config.enabled
+
+    if not enabled:
         return None
 
     # Prepare trigger parameter
     trigger = None
-    if config.trigger is not None:
-        if isinstance(config.trigger, list):
-            trigger = [t.to_tuple() for t in config.trigger]
+    if summarization_config.trigger is not None:
+        if isinstance(summarization_config.trigger, list):
+            trigger = [t.to_tuple() for t in summarization_config.trigger]
         else:
-            trigger = config.trigger.to_tuple()
+            trigger = summarization_config.trigger.to_tuple()
+    elif runtime_override is True:
+        trigger = ContextSize(type="messages", value=50).to_tuple()
 
     # Prepare keep parameter
-    keep = config.keep.to_tuple()
+    keep = summarization_config.keep.to_tuple()
 
     # Prepare model parameter
-    if config.model_name:
-        model = create_chat_model(name=config.model_name, thinking_enabled=False)
+    if summarization_config.model_name:
+        model = create_chat_model(
+            name=summarization_config.model_name,
+            thinking_enabled=False,
+        )
     else:
         # Use a lightweight model for summarization to save costs
         # Falls back to default model if not explicitly specified
@@ -72,11 +86,13 @@ def _create_summarization_middleware() -> SummarizationMiddleware | None:
         "keep": keep,
     }
 
-    if config.trim_tokens_to_summarize is not None:
-        kwargs["trim_tokens_to_summarize"] = config.trim_tokens_to_summarize
+    if summarization_config.trim_tokens_to_summarize is not None:
+        kwargs["trim_tokens_to_summarize"] = (
+            summarization_config.trim_tokens_to_summarize
+        )
 
-    if config.summary_prompt is not None:
-        kwargs["summary_prompt"] = config.summary_prompt
+    if summarization_config.summary_prompt is not None:
+        kwargs["summary_prompt"] = summarization_config.summary_prompt
 
     return SummarizationMiddleware(**kwargs)
 
@@ -220,7 +236,7 @@ def _build_middlewares(config: RunnableConfig, model_name: str | None, agent_nam
     middlewares = build_lead_runtime_middlewares(lazy_init=True)
 
     # Add summarization middleware if enabled
-    summarization_middleware = _create_summarization_middleware()
+    summarization_middleware = _create_summarization_middleware(config)
     if summarization_middleware is not None:
         middlewares.append(summarization_middleware)
 
@@ -250,6 +266,7 @@ def _build_middlewares(config: RunnableConfig, model_name: str | None, agent_nam
     # Remind the model which workspace is already bound to this thread so it
     # defaults to inspecting that directory instead of asking for a path.
     middlewares.append(WorkspaceContextMiddleware())
+    middlewares.append(WorkspaceGroundingMiddleware())
 
     # Add DeferredToolFilterMiddleware to hide deferred tool schemas from model binding
     if app_config.tool_search.enabled:
@@ -290,6 +307,7 @@ def make_lead_agent(config: RunnableConfig):
     max_concurrent_subagents = cfg.get("max_concurrent_subagents", 3)
     is_bootstrap = cfg.get("is_bootstrap", False)
     agent_name = cfg.get("agent_name")
+    thread_id = cfg.get("thread_id")
 
     agent_config = load_agent_config(agent_name) if not is_bootstrap else None
     # Custom agent model or fallback to global/default model resolution
@@ -333,10 +351,14 @@ def make_lead_agent(config: RunnableConfig):
         }
     )
 
+    model_create_kwargs = {}
+    if thread_id and model_name and model_name.startswith("deepseek-web-"):
+        model_create_kwargs["model_kwargs"] = {"user": str(thread_id)}
+
     if is_bootstrap:
         # Special bootstrap agent with minimal prompt for initial custom agent creation flow
         return create_agent(
-            model=create_chat_model(name=model_name, thinking_enabled=thinking_enabled),
+            model=create_chat_model(name=model_name, thinking_enabled=thinking_enabled, **model_create_kwargs),
             tools=get_available_tools(model_name=model_name, subagent_enabled=subagent_enabled) + [setup_agent],
             middleware=_build_middlewares(config, model_name=model_name),
             system_prompt=apply_prompt_template(subagent_enabled=subagent_enabled, max_concurrent_subagents=max_concurrent_subagents, available_skills=set(["bootstrap"])),
@@ -345,7 +367,12 @@ def make_lead_agent(config: RunnableConfig):
 
     # Default lead agent (unchanged behavior)
     return create_agent(
-        model=create_chat_model(name=model_name, thinking_enabled=thinking_enabled, reasoning_effort=reasoning_effort),
+        model=create_chat_model(
+            name=model_name,
+            thinking_enabled=thinking_enabled,
+            reasoning_effort=reasoning_effort,
+            **model_create_kwargs,
+        ),
         tools=get_available_tools(model_name=model_name, groups=agent_config.tool_groups if agent_config else None, subagent_enabled=subagent_enabled),
         middleware=_build_middlewares(config, model_name=model_name, agent_name=agent_name),
         system_prompt=apply_prompt_template(

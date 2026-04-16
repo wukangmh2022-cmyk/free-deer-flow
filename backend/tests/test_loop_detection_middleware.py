@@ -7,6 +7,9 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
 from deerflow.agents.middlewares.loop_detection_middleware import (
     _HARD_STOP_MSG,
+    LOOP_CONTROL_KEY,
+    LOOP_CONTROL_MESSAGE_NAME,
+    LOOP_CONTROL_WARNING,
     LoopDetectionMiddleware,
     _hash_tool_calls,
 )
@@ -153,6 +156,9 @@ class TestLoopDetection:
         assert len(msgs) == 1
         assert isinstance(msgs[0], HumanMessage)
         assert "LOOP DETECTED" in msgs[0].content
+        assert msgs[0].name == LOOP_CONTROL_MESSAGE_NAME
+        assert msgs[0].additional_kwargs["hide_from_ui"] is True
+        assert msgs[0].additional_kwargs[LOOP_CONTROL_KEY] == LOOP_CONTROL_WARNING
 
     def test_warn_only_injected_once(self):
         """Warning for the same hash should only be injected once per thread."""

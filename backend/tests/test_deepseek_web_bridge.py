@@ -4,9 +4,12 @@ from deerflow.models.deepseek_web_bridge import (
     DeepSeekWebBridge,
     choose_best_assistant_candidate,
     choose_best_assistant_text,
+    choose_best_payload_candidate,
     choose_best_payload_text,
     extract_transport_payload_candidates,
     extract_json_object,
+    is_placeholder_assistant_payload_text,
+    is_suspicious_short_fragment,
     salvage_tool_calls_payload,
 )
 
@@ -79,6 +82,73 @@ def test_reanchor_threshold_triggers_full_mode():
     assert should_reanchor is True
 
 
+def test_thinking_candidate_state_detects_deepseek_toggle_selection():
+    bridge = DeepSeekWebBridge(sticky_marker="flowflow__system_prompt_v1")
+
+    assert (
+        bridge._thinking_candidate_state(  # noqa: SLF001
+            {
+                "className": "ds-atom-button ds-toggle-button ds-toggle-button--selected ds-toggle-button--md",
+            }
+        )
+        is True
+    )
+    assert (
+        bridge._thinking_candidate_state(  # noqa: SLF001
+            {
+                "className": "ds-atom-button ds-toggle-button ds-toggle-button--md",
+            }
+        )
+        is False
+    )
+
+
+def test_switch_session_clears_runtime_state_and_resets_page(monkeypatch, tmp_path):
+    first = tmp_path / "session-a.json"
+    second = tmp_path / "session-b.json"
+
+    bridge = DeepSeekWebBridge(
+        sticky_marker="marker-a",
+        session_state_path=str(first),
+        reuse_persisted_chat=True,
+    )
+    bridge._active_session_state_path = str(first.resolve())  # noqa: SLF001
+    bridge._active_sticky_marker = "marker-a"  # noqa: SLF001
+    bridge._sticky_initialized = True  # noqa: SLF001
+    bridge._sticky_last_messages = [{"role": "user", "content": "hi"}]  # noqa: SLF001
+    bridge._sticky_messages_since_full = 3  # noqa: SLF001
+    bridge._persisted_chat_url = "https://chat.deepseek.com/a/chat/s/demo"  # noqa: SLF001
+    bridge._state_loaded = True  # noqa: SLF001
+
+    saved_paths: list[str | None] = []
+    reset_calls = {"count": 0}
+
+    monkeypatch.setattr(
+        bridge,
+        "_save_session_state",
+        lambda: saved_paths.append(bridge._active_session_state_path),  # noqa: SLF001
+    )
+    monkeypatch.setattr(
+        bridge,
+        "reset_page",
+        lambda: reset_calls.__setitem__("count", reset_calls["count"] + 1),
+    )
+
+    bridge.session_state_path = str(second)
+    bridge.sticky_marker = "marker-b"
+    bridge._switch_session_if_needed()  # noqa: SLF001
+
+    assert saved_paths == [str(first.resolve())]
+    assert reset_calls["count"] == 1
+    assert bridge._active_session_state_path == str(second.resolve())  # noqa: SLF001
+    assert bridge._active_sticky_marker == "marker-b"  # noqa: SLF001
+    assert bridge._sticky_initialized is False  # noqa: SLF001
+    assert bridge._sticky_last_messages == []  # noqa: SLF001
+    assert bridge._sticky_messages_since_full == 0  # noqa: SLF001
+    assert bridge._persisted_chat_url is None  # noqa: SLF001
+    assert bridge._state_loaded is False  # noqa: SLF001
+
+
 def test_parse_model_payload_accepts_standard_tool_arguments():
     bridge = DeepSeekWebBridge(sticky_marker="flowflow__system_prompt_v1")
     arguments = {
@@ -140,6 +210,132 @@ def test_parse_model_payload_accepts_json_string_arguments():
             "id": "call_456",
             "name": "write_file",
             "arguments": arguments,
+        }
+    ]
+
+
+def test_parse_model_payload_promotes_single_tool_object_to_tool_calls():
+    bridge = DeepSeekWebBridge(sticky_marker="flowflow__system_prompt_v1")
+    raw = json.dumps(
+        {
+            "tool": "Bash",
+            "arguments": {
+                "command": "ls -la",
+                "description": "List files in current directory",
+            },
+        },
+        ensure_ascii=False,
+    )
+
+    payload = bridge.parse_model_payload(raw)
+
+    assert payload["content"] == ""
+    assert len(payload["tool_calls"]) == 1
+    assert payload["tool_calls"][0]["name"] == "Bash"
+    assert payload["tool_calls"][0]["arguments"]["command"] == "ls -la"
+
+
+def test_parse_model_payload_promotes_function_style_tool_call_from_content():
+    bridge = DeepSeekWebBridge(sticky_marker="flowflow__system_prompt_v1")
+    raw = json.dumps(
+        {
+            "content": "我来阅读项目的README文件，了解这个项目的具体内容。\nread_file({\"description\": \"阅读项目README了解详情\", \"path\": \"/mnt/workspaces/downloads/my-poor-renderer-master/README.md\"})"
+        },
+        ensure_ascii=False,
+    )
+
+    payload = bridge.parse_model_payload(raw)
+
+    assert payload["content"] == ""
+    assert payload["tool_calls"] == [
+        {
+            "id": payload["tool_calls"][0]["id"],
+            "name": "read_file",
+            "arguments": {
+                "description": "阅读项目README了解详情",
+                "path": "/mnt/workspaces/downloads/my-poor-renderer-master/README.md",
+            },
+        }
+    ]
+    assert payload["tool_calls"][0]["id"].startswith("call_")
+
+
+def test_parse_model_payload_promotes_fenced_json_tool_block_from_content():
+    bridge = DeepSeekWebBridge(sticky_marker="flowflow__system_prompt_v1")
+    raw = json.dumps(
+        {
+            "content": "我来研究一下这个项目。\n```json\n{\"tool\":\"ls\",\"arguments\":{\"description\":\"查看项目根目录结构\",\"path\":\"/mnt/workspaces/downloads/my-poor-renderer-master\"}}\n```"
+        },
+        ensure_ascii=False,
+    )
+
+    payload = bridge.parse_model_payload(raw)
+
+    assert payload["content"] == ""
+    assert payload["tool_calls"] == [
+        {
+            "id": payload["tool_calls"][0]["id"],
+            "name": "ls",
+            "arguments": {
+                "description": "查看项目根目录结构",
+                "path": "/mnt/workspaces/downloads/my-poor-renderer-master",
+            },
+        }
+    ]
+    assert payload["tool_calls"][0]["id"].startswith("call_")
+
+
+def test_parse_model_payload_keeps_ls_from_real_capture_style_payload():
+    bridge = DeepSeekWebBridge(sticky_marker="flowflow__system_prompt_v1")
+    raw = json.dumps(
+        {
+            "content": "正在分析项目源码结构，先列目录。",
+            "tool_calls": [
+                {
+                    "id": "ls_1",
+                    "name": "ls",
+                    "arguments": {
+                        "description": "查看项目根目录结构",
+                        "path": "/mnt/workspaces/downloads/my-poor-renderer-master",
+                    },
+                }
+            ],
+        },
+        ensure_ascii=False,
+    )
+
+    payload = bridge.parse_model_payload(raw)
+
+    assert payload["tool_calls"] == [
+        {
+            "id": "ls_1",
+            "name": "ls",
+            "arguments": {
+                "description": "查看项目根目录结构",
+                "path": "/mnt/workspaces/downloads/my-poor-renderer-master",
+            },
+        }
+    ]
+
+
+def test_parse_model_payload_normalizes_hyphenated_tool_name():
+    bridge = DeepSeekWebBridge(sticky_marker="flowflow__system_prompt_v1")
+    raw = json.dumps(
+        {
+            "name": "write-file",
+            "arguments": {"path": "/tmp/a.txt", "content": "hello"},
+            "id": "call_custom_1",
+        },
+        ensure_ascii=False,
+    )
+
+    payload = bridge.parse_model_payload(raw)
+
+    assert payload["tool_calls"] == [
+        {
+            "id": "call_custom_1",
+            "name": "write_file",
+            "arguments": {"path": "/tmp/a.txt", "content": "hello"},
         }
     ]
 
@@ -288,6 +484,20 @@ Return exactly one JSON object with this schema:
     assert chosen == {"index": 4, "text": assistant_payload}
 
 
+def test_choose_best_assistant_candidate_prefers_latest_reply_over_longer_older_payload():
+    older_payload = '{"content":"this is the first reply and it is much longer","tool_calls":[]}'
+    latest_reply = '{"content":"second turn","tool_calls":[]}'
+
+    chosen = choose_best_assistant_candidate(
+        [
+            {"index": 4, "text": older_payload},
+            {"index": 5, "text": latest_reply},
+        ]
+    )
+
+    assert chosen == {"index": 5, "text": latest_reply}
+
+
 def test_choose_best_assistant_candidate_falls_back_to_latest_when_no_payload_markers_exist():
     chosen = choose_best_assistant_candidate(
         [
@@ -297,6 +507,21 @@ def test_choose_best_assistant_candidate_falls_back_to_latest_when_no_payload_ma
     )
 
     assert chosen == {"index": 3, "text": "still thinking but longer"}
+
+
+def test_choose_best_payload_candidate_prefers_latest_dom_payload_over_longer_older_payload():
+    older_payload = {
+        "probeId": "old",
+        "domIndex": 40,
+        "text": '{"content":"this is the first reply and it is much longer","tool_calls":[]}',
+    }
+    latest_payload = {
+        "probeId": "new",
+        "domIndex": 41,
+        "text": '{"content":"second turn","tool_calls":[]}',
+    }
+
+    assert choose_best_payload_candidate([older_payload, latest_payload]) == latest_payload
 
 
 def test_extract_transport_payload_candidates_finds_nested_json_payload_string():
@@ -374,3 +599,21 @@ print("done")
     assert 'print("done")' in payload["tool_calls"][1]["arguments"]["content"]
     assert payload["tool_calls"][0]["id"].startswith("call_")
     assert payload["tool_calls"][1]["id"].startswith("call_")
+
+
+def test_is_suspicious_short_fragment_flags_truncated_tokens_only():
+    assert is_suspicious_short_fragment("我们") is True
+    assert is_suspicious_short_fragment("ok") is True
+    assert is_suspicious_short_fragment('{"content":"hi","tool_calls":[]}') is False
+    assert is_suspicious_short_fragment("好的，已完成。") is False
+
+
+def test_is_placeholder_assistant_payload_text_detects_schema_literal_output():
+    assert is_placeholder_assistant_payload_text('{"content":"string","tool_calls":[]}') is True
+    assert (
+        is_placeholder_assistant_payload_text(
+            '{"content":"","tool_calls":[{"name":"string","arguments":{},"id":"string"}]}'
+        )
+        is True
+    )
+    assert is_placeholder_assistant_payload_text('{"content":"已完成修改","tool_calls":[]}') is False

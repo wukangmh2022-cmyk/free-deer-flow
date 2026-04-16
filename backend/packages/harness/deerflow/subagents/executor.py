@@ -172,9 +172,13 @@ class SubagentExecutor:
         model = create_chat_model(name=model_name, thinking_enabled=False)
 
         from deerflow.agents.middlewares.tool_error_handling_middleware import build_subagent_runtime_middlewares
+        from deerflow.agents.middlewares.workspace_context_middleware import WorkspaceContextMiddleware
+        from deerflow.agents.middlewares.workspace_grounding_middleware import WorkspaceGroundingMiddleware
 
         # Reuse shared middleware composition with lead agent.
         middlewares = build_subagent_runtime_middlewares(lazy_init=True)
+        middlewares.append(WorkspaceContextMiddleware())
+        middlewares.append(WorkspaceGroundingMiddleware())
 
         return create_agent(
             model=model,

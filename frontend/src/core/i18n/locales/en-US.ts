@@ -106,6 +106,15 @@ export const enUS: Translations = {
     reasoningEffortHighDescription:
       "Full-dimensional Logic Deduction + Multi-path Verification + Backward Check",
     searchModels: "Search models...",
+    contextCompression: "Context compression",
+    contextCompressionDescription:
+      "Automatically summarize older context in long conversations so the model stays focused on the current task.",
+    skillCommandLabel: "Available skills",
+    skillCommandDescription:
+      "Type /skill to filter enabled skills. Clicking one inserts an instruction telling the agent to use that skill first.",
+    skillCommandEmpty: "No enabled skills match this query",
+    skillCommandTemplate: (skillName: string, skillDescription: string) =>
+      `Please prioritize skill "${skillName}" for this request. Before doing the task, read that skill's SKILL.md and follow its workflow strictly. Skill description: ${skillDescription}`,
     surpriseMe: "Surprise",
     surpriseMePrompt: "Surprise me",
     followupLoading: "Generating follow-up questions...",

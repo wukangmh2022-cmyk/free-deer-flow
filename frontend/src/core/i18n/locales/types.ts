@@ -85,6 +85,15 @@ export interface Translations {
     reasoningEffortHigh: string;
     reasoningEffortHighDescription: string;
     searchModels: string;
+    contextCompression: string;
+    contextCompressionDescription: string;
+    skillCommandLabel: string;
+    skillCommandDescription: string;
+    skillCommandEmpty: string;
+    skillCommandTemplate: (
+      skillName: string,
+      skillDescription: string,
+    ) => string;
     surpriseMe: string;
     surpriseMePrompt: string;
     followupLoading: string;

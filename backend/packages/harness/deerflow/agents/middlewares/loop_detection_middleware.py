@@ -27,10 +27,11 @@ from langgraph.runtime import Runtime
 logger = logging.getLogger(__name__)
 
 # Defaults — can be overridden via constructor
-_DEFAULT_WARN_THRESHOLD = 3  # inject warning after 3 identical calls
-_DEFAULT_HARD_LIMIT = 5  # force-stop after 5 identical calls
+_DEFAULT_WARN_THRESHOLD = 2  # inject warning after 2 identical calls
+_DEFAULT_HARD_LIMIT = 4  # force-stop after 4 identical calls
 _DEFAULT_WINDOW_SIZE = 20  # track last N tool calls
 _DEFAULT_MAX_TRACKED_THREADS = 100  # LRU eviction limit
+_LOOP_HASH_IGNORED_TOOL_NAMES = {"write_todos"}
 
 
 def _normalize_tool_call_args(raw_args: object) -> tuple[dict, str | None]:
@@ -112,6 +113,8 @@ def _hash_tool_calls(tool_calls: list[dict]) -> str:
     normalized: list[str] = []
     for tc in tool_calls:
         name = tc.get("name", "")
+        if name in _LOOP_HASH_IGNORED_TOOL_NAMES:
+            continue
         args, fallback_key = _normalize_tool_call_args(tc.get("args", {}))
         key = _stable_tool_key(name, args, fallback_key)
 
@@ -122,6 +125,10 @@ def _hash_tool_calls(tool_calls: list[dict]) -> str:
     blob = json.dumps(normalized, sort_keys=True, default=str)
     return hashlib.md5(blob.encode()).hexdigest()[:12]
 
+
+LOOP_CONTROL_MESSAGE_NAME = "loop_detection"
+LOOP_CONTROL_KEY = "loop_control"
+LOOP_CONTROL_WARNING = "warning"
 
 _WARNING_MSG = "[LOOP DETECTED] You are repeating the same tool calls. Stop calling tools and produce your final answer now. If you cannot complete the task, summarize what you accomplished so far."
 
@@ -261,6 +268,17 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
         # Fallback: coerce unexpected types to str to avoid TypeError
         return str(content) + f"\n\n{text}"
 
+    @staticmethod
+    def _build_warning_message(content: str) -> HumanMessage:
+        return HumanMessage(
+            name=LOOP_CONTROL_MESSAGE_NAME,
+            content=content,
+            additional_kwargs={
+                "hide_from_ui": True,
+                LOOP_CONTROL_KEY: LOOP_CONTROL_WARNING,
+            },
+        )
+
     def _apply(self, state: AgentState, runtime: Runtime) -> dict | None:
         warning, hard_stop = self._track_and_check(state, runtime)
 
@@ -283,7 +301,7 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
             # the conversation; injecting one mid-conversation crashes
             # langchain_anthropic's _format_messages(). HumanMessage works
             # with all providers. See #1299.
-            return {"messages": [HumanMessage(content=warning)]}
+            return {"messages": [self._build_warning_message(warning)]}
 
         return None
 

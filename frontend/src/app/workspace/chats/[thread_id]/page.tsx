@@ -2,7 +2,7 @@
 
 import { FolderIcon } from "lucide-react";
 import { useSearchParams } from "next/navigation";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 
 import { type PromptInputMessage } from "@/components/ai-elements/prompt-input";
@@ -30,6 +30,7 @@ import { TokenUsageIndicator } from "@/components/workspace/token-usage-indicato
 import { Welcome } from "@/components/workspace/welcome";
 import { WorkspacePickerDialog } from "@/components/workspace/workspace-picker-dialog";
 import { useI18n } from "@/core/i18n/hooks";
+import { useModels } from "@/core/models/hooks";
 import { useNotification } from "@/core/notification/hooks";
 import { useThreadSettings } from "@/core/settings";
 import { mirrorThreadFiles } from "@/core/thread-files/api";
@@ -40,6 +41,30 @@ import { useWorkspaces } from "@/core/workspaces";
 import type { Workspace } from "@/core/workspaces/types";
 import { env } from "@/env";
 import { cn } from "@/lib/utils";
+import type { AgentThreadState } from "@/core/threads";
+
+function resolveStickyModelName(
+  modelName: string | undefined,
+  availableModelNames: Set<string>,
+): string | undefined {
+  if (!modelName) {
+    return undefined;
+  }
+  if (modelName.includes("sticky")) {
+    return modelName;
+  }
+  const directStickyName = `${modelName}-sticky`;
+  if (availableModelNames.has(directStickyName)) {
+    return directStickyName;
+  }
+  if (
+    modelName === "deepseek-web-deerflow" &&
+    availableModelNames.has("deepseek-web-deerflow-sticky")
+  ) {
+    return "deepseek-web-deerflow-sticky";
+  }
+  return undefined;
+}
 
 export default function ChatPage() {
   const { t } = useI18n();
@@ -50,6 +75,7 @@ export default function ChatPage() {
   const [settings, setSettings] = useThreadSettings(threadId);
   const [mounted, setMounted] = useState(false);
   const { workspaces } = useWorkspaces();
+  const { models } = useModels();
   const threadRecordQuery = useThreadRecord(isNewThread ? undefined : threadId);
   const threadRecord = threadRecordQuery.data;
   const resolvedThreadId =
@@ -62,7 +88,14 @@ export default function ChatPage() {
   const retryContinueRef = useRef<(() => void) | null>(null);
   const retriedHumanMessageIdsRef = useRef<Set<string>>(new Set());
   const outputSyncTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pendingStickyPromotionThreadIdRef = useRef<string | null>(null);
   useSpecificChatMode();
+
+  const availableModelNamesRef = useRef<Set<string>>(new Set());
+
+  useEffect(() => {
+    availableModelNamesRef.current = new Set(models.map((model) => model.name));
+  }, [models]);
 
   useEffect(() => {
     setMounted(true);
@@ -152,6 +185,9 @@ export default function ChatPage() {
     isMock,
     initialThreadMetadata: buildWorkspaceContext(),
     onStart: (createdThreadId) => {
+      pendingStickyPromotionThreadIdRef.current = isNewThread
+        ? createdThreadId
+        : null;
       setThreadId(createdThreadId);
       setIsNewThread(false);
       // ! Important: Never use next.js router for navigation in this case, otherwise it will cause the thread to re-mount and lose all states. Use native history API instead.
@@ -206,6 +242,23 @@ export default function ChatPage() {
           () => {},
         );
       }
+
+      if (pendingStickyPromotionThreadIdRef.current !== threadId) {
+        return;
+      }
+
+      const stickyModelName = resolveStickyModelName(
+        settings.context.model_name,
+        availableModelNamesRef.current,
+      );
+      pendingStickyPromotionThreadIdRef.current = null;
+      if (!stickyModelName || stickyModelName === settings.context.model_name) {
+        return;
+      }
+      setSettings("context", {
+        ...settings.context,
+        model_name: stickyModelName,
+      });
     },
     onToolEnd: ({ name }) => {
       const currentWorkspacePath =
@@ -275,6 +328,46 @@ export default function ChatPage() {
     await thread.stop();
   }, [thread]);
 
+  const shouldRecoverFromErroredRun =
+    typeof resolvedThreadId === "string" &&
+    thread.isLoading &&
+    (threadRecord?.status === "error" || threadRecord?.status === "interrupted") &&
+    Array.isArray(threadRecord?.values?.messages) &&
+    threadRecord.values.messages.length > 0;
+
+  useEffect(() => {
+    if (!shouldRecoverFromErroredRun || !resolvedThreadId) {
+      return;
+    }
+    if (typeof window === "undefined") {
+      return;
+    }
+    window.sessionStorage.removeItem(`lg:stream:${resolvedThreadId}`);
+  }, [resolvedThreadId, shouldRecoverFromErroredRun]);
+
+  const displayThread = useMemo(() => {
+    if (!shouldRecoverFromErroredRun || !threadRecord) {
+      return thread;
+    }
+
+    const recoveredValues = (threadRecord.values ?? {}) as AgentThreadState;
+
+    return {
+      ...thread,
+      messages: recoveredValues.messages ?? thread.messages,
+      values: {
+        ...thread.values,
+        ...recoveredValues,
+      },
+      isLoading: false,
+      error:
+        thread.error ??
+        (threadRecord.status === "error"
+          ? new Error("The previous run ended with an error.")
+          : undefined),
+    };
+  }, [shouldRecoverFromErroredRun, thread, threadRecord]);
+
   const messageListPaddingBottom = showFollowups
     ? MESSAGE_LIST_DEFAULT_PADDING_BOTTOM +
       MESSAGE_LIST_FOLLOWUPS_EXTRA_PADDING_BOTTOM
@@ -291,7 +384,7 @@ export default function ChatPage() {
   return (
     <ThreadContext.Provider
       value={{
-        thread,
+        thread: displayThread,
         isMock,
         workspaceTargetPath,
         workspaceContainerPath,
@@ -308,7 +401,7 @@ export default function ChatPage() {
             )}
           >
             <div className="flex w-full min-w-0 flex-col text-sm font-medium">
-              <ThreadTitle threadId={threadId} thread={thread} />
+              <ThreadTitle threadId={threadId} thread={displayThread} />
               {!isNewThread && (
                 <div className="text-muted-foreground truncate text-[11px] font-normal">
                   {workspaceMetadataOfThread(threadRecord).workspace_name ??
@@ -317,7 +410,7 @@ export default function ChatPage() {
               )}
             </div>
             <div className="flex items-center gap-2">
-              <TokenUsageIndicator messages={thread.messages} />
+              <TokenUsageIndicator messages={displayThread.messages} />
               <ExportTrigger threadId={threadId} />
               <ThreadFilesTrigger />
               <ArtifactTrigger />
@@ -328,7 +421,7 @@ export default function ChatPage() {
               <MessageList
                 className={cn("size-full", !isNewThread && "pt-10")}
                 threadId={threadId}
-                thread={thread}
+                thread={displayThread}
                 paddingBottom={messageListPaddingBottom}
               />
             </div>
@@ -346,9 +439,10 @@ export default function ChatPage() {
                   <div className="absolute right-0 bottom-0 left-0">
                     <TodoList
                       className="bg-background/5"
-                      todos={thread.values.todos ?? []}
+                      todos={displayThread.values.todos ?? []}
                       hidden={
-                        !thread.values.todos || thread.values.todos.length === 0
+                        !displayThread.values.todos ||
+                        displayThread.values.todos.length === 0
                       }
                     />
                   </div>
@@ -388,9 +482,9 @@ export default function ChatPage() {
                       threadId={threadId}
                       autoFocus={isNewThread}
                       status={
-                        thread.error
+                        displayThread.error
                           ? "error"
-                          : thread.isLoading
+                          : displayThread.isLoading
                             ? "streaming"
                             : "ready"
                       }

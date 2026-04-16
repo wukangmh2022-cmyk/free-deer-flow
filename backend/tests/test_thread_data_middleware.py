@@ -65,6 +65,72 @@ class TestThreadDataMiddleware:
         assert result["thread_data"]["workspace_path"] == "/Users/demo/project"
         assert result["thread_data"]["workspace_container_path"] == "/mnt/projects/demo"
 
+    def test_before_agent_falls_back_to_configurable_workspace_when_runtime_context_omits_it(self, tmp_path, monkeypatch):
+        middleware = ThreadDataMiddleware(base_dir=str(tmp_path), lazy_init=True)
+        monkeypatch.setattr(
+            "deerflow.agents.middlewares.thread_data_middleware.get_config",
+            lambda: {
+                "configurable": {
+                    "thread_id": "thread-from-config",
+                    "workspace_path": "/Users/demo/project",
+                    "workspace_container_path": "/mnt/projects/demo",
+                }
+            },
+        )
+
+        result = middleware.before_agent(
+            state={},
+            runtime=Runtime(context={}),
+        )
+
+        assert result is not None
+        assert result["thread_data"]["workspace_path"] == "/Users/demo/project"
+        assert result["thread_data"]["workspace_container_path"] == "/mnt/projects/demo"
+
+    def test_before_agent_preserves_inherited_thread_data_from_parent_agent(self, tmp_path):
+        middleware = ThreadDataMiddleware(base_dir=str(tmp_path), lazy_init=True)
+
+        result = middleware.before_agent(
+            state={
+                "thread_data": {
+                    "workspace_path": "/Users/pippo/Downloads/deerflow",
+                    "workspace_container_path": "/mnt/workspaces/downloads/deerflow",
+                    "uploads_path": "/mnt/workspaces/downloads/deerflow/.thread/uploads",
+                    "outputs_path": "/mnt/workspaces/downloads/deerflow/.thread/outputs",
+                }
+            },
+            runtime=Runtime(context={"thread_id": "thread-123"}),
+        )
+
+        assert result is not None
+        assert result["thread_data"]["workspace_path"] == "/Users/pippo/Downloads/deerflow"
+        assert result["thread_data"]["workspace_container_path"] == "/mnt/workspaces/downloads/deerflow"
+        assert result["thread_data"]["uploads_path"] == "/mnt/workspaces/downloads/deerflow/.thread/uploads"
+        assert result["thread_data"]["outputs_path"] == "/mnt/workspaces/downloads/deerflow/.thread/outputs"
+
+    def test_before_agent_prefers_explicit_runtime_workspace_over_inherited_parent_state(self, tmp_path):
+        middleware = ThreadDataMiddleware(base_dir=str(tmp_path), lazy_init=True)
+
+        result = middleware.before_agent(
+            state={
+                "thread_data": {
+                    "workspace_path": "/Users/old/project",
+                    "workspace_container_path": "/mnt/old/project",
+                }
+            },
+            runtime=Runtime(
+                context={
+                    "thread_id": "thread-123",
+                    "workspace_path": "/Users/new/project",
+                    "workspace_container_path": "/mnt/new/project",
+                }
+            ),
+        )
+
+        assert result is not None
+        assert result["thread_data"]["workspace_path"] == "/Users/new/project"
+        assert result["thread_data"]["workspace_container_path"] == "/mnt/new/project"
+
     def test_before_agent_raises_clear_error_when_thread_id_missing_everywhere(self, tmp_path, monkeypatch):
         middleware = ThreadDataMiddleware(base_dir=str(tmp_path), lazy_init=True)
         monkeypatch.setattr(

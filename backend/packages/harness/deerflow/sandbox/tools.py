@@ -1,10 +1,15 @@
 import hashlib
+import os
 import posixpath
 import re
 import shlex
+from contextlib import contextmanager
 from pathlib import Path
+from typing import Annotated
 
-from langchain.tools import ToolRuntime, tool
+from langchain.tools import InjectedToolCallId, ToolRuntime, tool
+from langchain_core.messages import ToolMessage
+from langgraph.types import Command
 from langgraph.typing import ContextT
 
 from deerflow.agents.thread_state import ThreadDataState, ThreadState
@@ -35,10 +40,15 @@ _LOCAL_BASH_SYSTEM_PATH_PREFIXES = (
 
 _DEFAULT_SKILLS_CONTAINER_PATH = "/mnt/skills"
 _ACP_WORKSPACE_VIRTUAL_PATH = "/mnt/acp-workspace"
+_OUTPUTS_VIRTUAL_PREFIX = f"{VIRTUAL_PATH_PREFIX}/outputs"
 _DEFAULT_GLOB_MAX_RESULTS = 200
 _MAX_GLOB_MAX_RESULTS = 1000
 _DEFAULT_GREP_MAX_RESULTS = 100
 _MAX_GREP_MAX_RESULTS = 500
+_LOCAL_PYTHON_BRIDGE_ENABLED_ENV = "DEERFLOW_LOCAL_SANDBOX_PATH_BRIDGE"
+_LOCAL_PYTHON_BRIDGE_WORKSPACE_ENV = "DEERFLOW_LOCAL_SANDBOX_WORKSPACE_PATH"
+_LOCAL_PYTHON_BRIDGE_UPLOADS_ENV = "DEERFLOW_LOCAL_SANDBOX_UPLOADS_PATH"
+_LOCAL_PYTHON_BRIDGE_OUTPUTS_ENV = "DEERFLOW_LOCAL_SANDBOX_OUTPUTS_PATH"
 
 
 def _get_skills_container_path() -> str:
@@ -226,8 +236,11 @@ def _resolve_host_path_for_document(path: str, thread_data: ThreadDataState | No
         return Path(_resolve_acp_workspace_path(path, thread_id))
     if _is_custom_mount_path(path):
         return Path(_resolve_custom_mount_path(path))
-    if thread_data is not None and path.startswith(f"{VIRTUAL_PATH_PREFIX}/"):
-        return Path(_resolve_and_validate_user_data_path(path, thread_data))
+    if thread_data is not None:
+        try:
+            return Path(_resolve_and_validate_user_data_path(path, thread_data))
+        except (OSError, PermissionError, SandboxRuntimeError, ValueError):
+            return None
     return None
 
 
@@ -416,6 +429,8 @@ def _resolve_local_read_path(path: str, thread_data: ThreadDataState) -> str:
         return _resolve_skills_path(path)
     if _is_acp_workspace_path(path):
         return _resolve_acp_workspace_path(path, _extract_thread_id_from_thread_data(thread_data))
+    if _is_custom_mount_path(path):
+        return _resolve_custom_mount_path(path)
     return _resolve_and_validate_user_data_path(path, thread_data)
 
 
@@ -517,11 +532,14 @@ def _thread_virtual_to_actual_mappings(thread_data: ThreadDataState) -> dict[str
     mappings: dict[str, str] = {}
 
     workspace = thread_data.get("workspace_path")
+    workspace_container = thread_data.get("workspace_container_path")
     uploads = thread_data.get("uploads_path")
     outputs = thread_data.get("outputs_path")
 
     if workspace:
         mappings[f"{VIRTUAL_PATH_PREFIX}/workspace"] = workspace
+        if isinstance(workspace_container, str) and workspace_container.strip():
+            mappings[workspace_container] = workspace
     if uploads:
         mappings[f"{VIRTUAL_PATH_PREFIX}/uploads"] = uploads
     if outputs:
@@ -537,9 +555,99 @@ def _thread_virtual_to_actual_mappings(thread_data: ThreadDataState) -> dict[str
     return mappings
 
 
+def _thread_host_to_tool_mappings(thread_data: ThreadDataState) -> list[tuple[Path, str]]:
+    """Return host-root -> tool-path mappings for the current thread.
+
+    This lets tools accept user-facing host paths such as `/Users/...` while
+    still executing against sandbox-visible paths in container-backed runtimes.
+    """
+    mappings: list[tuple[Path, str]] = []
+
+    workspace_host = thread_data.get("workspace_path")
+    workspace_tool = thread_data.get("workspace_container_path") or f"{VIRTUAL_PATH_PREFIX}/workspace"
+    uploads_host = thread_data.get("uploads_path")
+    outputs_host = thread_data.get("outputs_path")
+
+    if isinstance(workspace_host, str) and workspace_host.strip():
+        mappings.append((Path(workspace_host).expanduser().resolve(), workspace_tool))
+    if isinstance(uploads_host, str) and uploads_host.strip():
+        mappings.append((Path(uploads_host).expanduser().resolve(), f"{VIRTUAL_PATH_PREFIX}/uploads"))
+    if isinstance(outputs_host, str) and outputs_host.strip():
+        mappings.append((Path(outputs_host).expanduser().resolve(), f"{VIRTUAL_PATH_PREFIX}/outputs"))
+
+    for mount in _get_custom_mounts():
+        try:
+            host_root = Path(mount.host_path).expanduser().resolve()
+        except Exception:
+            continue
+        container_root = mount.container_path.rstrip("/") or "/"
+        mappings.append((host_root, container_root))
+
+    mappings.sort(key=lambda item: len(str(item[0])), reverse=True)
+    return mappings
+
+
+def _normalize_tool_input_path(path: str, thread_data: ThreadDataState | None) -> str:
+    """Normalize a user-provided path into the tool-visible sandbox path.
+
+    Accepts bound host paths (for example `/Users/.../project`) and converts
+    them to the corresponding virtual/container path before handing them to the
+    sandbox implementation.
+    """
+    if thread_data is None or not isinstance(path, str) or not path.strip():
+        return path
+
+    if (
+        path.startswith(f"{VIRTUAL_PATH_PREFIX}/")
+        or _is_skills_path(path)
+        or _is_acp_workspace_path(path)
+        or _is_custom_mount_path(path)
+    ):
+        return path
+
+    try:
+        candidate = Path(path).expanduser().resolve()
+    except Exception:
+        return path
+
+    for host_root, tool_root in _thread_host_to_tool_mappings(thread_data):
+        try:
+            relative = candidate.relative_to(host_root)
+        except ValueError:
+            continue
+        if relative == Path("."):
+            return tool_root
+        return f"{tool_root.rstrip('/')}/{relative.as_posix()}"
+
+    return path
+
+
 def _thread_actual_to_virtual_mappings(thread_data: ThreadDataState) -> dict[str, str]:
     """Build actual-to-virtual mappings for output masking."""
     return {actual: virtual for virtual, actual in _thread_virtual_to_actual_mappings(thread_data).items()}
+
+
+def _get_allowed_local_user_data_roots(thread_data: ThreadDataState) -> list[Path]:
+    """Return resolved host roots that back the thread's workspace/user-data paths."""
+    roots = [
+        Path(path).resolve()
+        for path in (
+            thread_data.get("workspace_path"),
+            thread_data.get("uploads_path"),
+            thread_data.get("outputs_path"),
+        )
+        if path is not None
+    ]
+    if not roots:
+        raise SandboxRuntimeError("No allowed local sandbox directories configured")
+    return roots
+
+
+def _resolve_local_user_data_host_path(path: str, thread_data: ThreadDataState) -> Path:
+    """Resolve a host path and ensure it stays inside the bound thread roots."""
+    resolved = Path(path).resolve()
+    _validate_resolved_user_data_path(resolved, thread_data)
+    return resolved
 
 
 def mask_local_paths_in_output(output: str, thread_data: ThreadDataState | None) -> str:
@@ -626,21 +734,22 @@ def _reject_path_traversal(path: str) -> None:
 
 
 def validate_local_tool_path(path: str, thread_data: ThreadDataState | None, *, read_only: bool = False) -> None:
-    """Validate that a virtual path is allowed for local-sandbox access.
+    """Validate that a tool path is allowed for local-sandbox access.
 
     This function is a security gate — it checks whether *path* may be
     accessed and raises on violation.  It does **not** resolve the virtual
     path to a host path; callers are responsible for resolution via
     ``_resolve_and_validate_user_data_path`` or ``_resolve_skills_path``.
 
-    Allowed virtual-path families:
+    Allowed path families:
       - ``/mnt/user-data/*``  — always allowed (read + write)
       - ``/mnt/skills/*``     — allowed only when *read_only* is True
       - ``/mnt/acp-workspace/*`` — allowed only when *read_only* is True
       - Custom mount paths (from config.yaml) — respects per-mount ``read_only`` flag
+      - Host paths that resolve inside the bound workspace/uploads/outputs roots
 
     Args:
-        path: The virtual path to validate.
+        path: The virtual path or bound host path to validate.
         thread_data: Thread data (must be present for local sandbox).
         read_only: When True, skills and ACP workspace paths are permitted.
 
@@ -669,6 +778,14 @@ def validate_local_tool_path(path: str, thread_data: ThreadDataState | None, *, 
     if path.startswith(f"{VIRTUAL_PATH_PREFIX}/"):
         return
 
+    # Bound host workspace/uploads/outputs paths are also allowed and will be
+    # normalized back into the same guarded roots before use.
+    try:
+        _resolve_local_user_data_host_path(path, thread_data)
+        return
+    except (OSError, PermissionError, SandboxRuntimeError, ValueError):
+        pass
+
     # Custom mount paths — respect read_only config
     if _is_custom_mount_path(path):
         mount = _get_custom_mount_for_path(path)
@@ -684,18 +801,7 @@ def _validate_resolved_user_data_path(resolved: Path, thread_data: ThreadDataSta
 
     Raises PermissionError if the path escapes workspace/uploads/outputs.
     """
-    allowed_roots = [
-        Path(p).resolve()
-        for p in (
-            thread_data.get("workspace_path"),
-            thread_data.get("uploads_path"),
-            thread_data.get("outputs_path"),
-        )
-        if p is not None
-    ]
-
-    if not allowed_roots:
-        raise SandboxRuntimeError("No allowed local sandbox directories configured")
+    allowed_roots = _get_allowed_local_user_data_roots(thread_data)
 
     for root in allowed_roots:
         try:
@@ -712,6 +818,9 @@ def _resolve_and_validate_user_data_path(path: str, thread_data: ThreadDataState
 
     Returns the resolved host path string.
     """
+    if not path.startswith(f"{VIRTUAL_PATH_PREFIX}/"):
+        return str(_resolve_local_user_data_host_path(path, thread_data))
+
     resolved_str = replace_virtual_path(path, thread_data)
     resolved = Path(resolved_str).resolve()
     _validate_resolved_user_data_path(resolved, thread_data)
@@ -753,6 +862,12 @@ def validate_local_bash_command_paths(command: str, thread_data: ThreadDataState
         if absolute_path == VIRTUAL_PATH_PREFIX or absolute_path.startswith(f"{VIRTUAL_PATH_PREFIX}/"):
             _reject_path_traversal(absolute_path)
             continue
+
+        try:
+            _resolve_local_user_data_host_path(absolute_path, thread_data)
+            continue
+        except (OSError, PermissionError, SandboxRuntimeError, ValueError):
+            pass
 
         # Allow skills container path (resolved by tools.py before passing to sandbox)
         if _is_skills_path(absolute_path):
@@ -850,6 +965,66 @@ def get_thread_data(runtime: ToolRuntime[ContextT, ThreadState] | None) -> Threa
     if runtime.state is None:
         return None
     return runtime.state.get("thread_data")
+
+
+def _get_local_python_bridge_dir() -> str:
+    """Return the directory that provides sitecustomize for host-bash Python runs."""
+    return str((Path(__file__).resolve().parent / "local" / "python_path_bridge").resolve())
+
+
+@contextmanager
+def _local_python_path_bridge_environment(thread_data: ThreadDataState | None):
+    """Expose thread-local virtual path mappings to Python subprocesses.
+
+    Local host-bash rewrites `/mnt/user-data/...` in the shell command itself,
+    but paths hard-coded inside executed Python scripts still need a bridge.
+    We inject a lightweight `sitecustomize.py` via PYTHONPATH so Python code
+    can transparently translate DeerFlow virtual paths back to real host paths.
+    """
+    bridge_dir = _get_local_python_bridge_dir()
+    pythonpath = os.environ.get("PYTHONPATH")
+    updated_pythonpath = f"{bridge_dir}{os.pathsep}{pythonpath}" if pythonpath else bridge_dir
+
+    desired_env = {
+        "PYTHONPATH": updated_pythonpath,
+        _LOCAL_PYTHON_BRIDGE_ENABLED_ENV: "1",
+        _LOCAL_PYTHON_BRIDGE_WORKSPACE_ENV: (thread_data or {}).get("workspace_path") or "",
+        _LOCAL_PYTHON_BRIDGE_UPLOADS_ENV: (thread_data or {}).get("uploads_path") or "",
+        _LOCAL_PYTHON_BRIDGE_OUTPUTS_ENV: (thread_data or {}).get("outputs_path") or "",
+    }
+    previous_env = {key: os.environ.get(key) for key in desired_env}
+
+    try:
+        for key, value in desired_env.items():
+            os.environ[key] = value
+        yield
+    finally:
+        for key, old_value in previous_env.items():
+            if old_value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = old_value
+
+
+def _normalize_outputs_artifact_path(path: str, thread_data: ThreadDataState | None) -> str | None:
+    """Return a virtual outputs path when *path* points inside the thread outputs dir."""
+    normalized = path.rstrip("/")
+    if normalized == _OUTPUTS_VIRTUAL_PREFIX or normalized.startswith(f"{_OUTPUTS_VIRTUAL_PREFIX}/"):
+        return normalized
+
+    outputs_path = thread_data.get("outputs_path") if thread_data else None
+    if not outputs_path:
+        return None
+
+    try:
+        relative = Path(path).expanduser().resolve().relative_to(Path(outputs_path).resolve())
+    except Exception:
+        return None
+
+    relative_posix = relative.as_posix()
+    if relative_posix == ".":
+        return _OUTPUTS_VIRTUAL_PREFIX
+    return f"{_OUTPUTS_VIRTUAL_PREFIX}/{relative_posix}"
 
 
 def is_local_sandbox(runtime: ToolRuntime[ContextT, ThreadState] | None) -> bool:
@@ -1090,7 +1265,8 @@ def bash_tool(runtime: ToolRuntime[ContextT, ThreadState], description: str, com
             validate_local_bash_command_paths(command, thread_data)
             command = replace_virtual_paths_in_command(command, thread_data)
             command = _apply_cwd_prefix(command, thread_data)
-            output = sandbox.execute_command(command)
+            with _local_python_path_bridge_environment(thread_data):
+                output = sandbox.execute_command(command)
             try:
                 from deerflow.config.app_config import get_app_config
 
@@ -1128,8 +1304,9 @@ def ls_tool(runtime: ToolRuntime[ContextT, ThreadState], description: str, path:
         sandbox = ensure_sandbox_initialized(runtime)
         ensure_thread_directories_exist(runtime)
         requested_path = path
+        thread_data = get_thread_data(runtime)
+        path = _normalize_tool_input_path(path, thread_data)
         if is_local_sandbox(runtime):
-            thread_data = get_thread_data(runtime)
             validate_local_tool_path(path, thread_data, read_only=True)
             if _is_skills_path(path):
                 path = _resolve_skills_path(path)
@@ -1188,9 +1365,9 @@ def glob_tool(
             default=_DEFAULT_GLOB_MAX_RESULTS,
             upper_bound=_MAX_GLOB_MAX_RESULTS,
         )
-        thread_data = None
+        thread_data = get_thread_data(runtime)
+        path = _normalize_tool_input_path(path, thread_data)
         if is_local_sandbox(runtime):
-            thread_data = get_thread_data(runtime)
             if thread_data is None:
                 raise SandboxRuntimeError("Thread data not available for local sandbox")
             path = _resolve_local_read_path(path, thread_data)
@@ -1242,9 +1419,9 @@ def grep_tool(
             default=_DEFAULT_GREP_MAX_RESULTS,
             upper_bound=_MAX_GREP_MAX_RESULTS,
         )
-        thread_data = None
+        thread_data = get_thread_data(runtime)
+        path = _normalize_tool_input_path(path, thread_data)
         if is_local_sandbox(runtime):
-            thread_data = get_thread_data(runtime)
             if thread_data is None:
                 raise SandboxRuntimeError("Thread data not available for local sandbox")
             path = _resolve_local_read_path(path, thread_data)
@@ -1301,10 +1478,11 @@ def read_file_tool(
         ensure_thread_directories_exist(runtime)
         requested_path = path
         thread_data = get_thread_data(runtime)
+        path = _normalize_tool_input_path(path, thread_data)
         if thread_data is not None:
-            validate_local_tool_path(requested_path, thread_data, read_only=True)
+            validate_local_tool_path(path, thread_data, read_only=True)
 
-        document_content = _maybe_read_convertible_document(runtime, requested_path, thread_data)
+        document_content = _maybe_read_convertible_document(runtime, path, thread_data)
         if document_content is not None:
             content = document_content
         else:
@@ -1351,7 +1529,8 @@ def write_file_tool(
     path: str,
     content: str,
     append: bool = False,
-) -> str:
+    tool_call_id: Annotated[str | None, InjectedToolCallId] = None,
+) -> str | Command:
     """Write text content to a file.
 
     Args:
@@ -1363,14 +1542,24 @@ def write_file_tool(
         sandbox = ensure_sandbox_initialized(runtime)
         ensure_thread_directories_exist(runtime)
         requested_path = path
+        thread_data = get_thread_data(runtime)
+        path = _normalize_tool_input_path(path, thread_data)
+        artifact_path = _normalize_outputs_artifact_path(requested_path, thread_data)
         if is_local_sandbox(runtime):
-            thread_data = get_thread_data(runtime)
             validate_local_tool_path(path, thread_data)
             if not _is_custom_mount_path(path):
                 path = _resolve_and_validate_user_data_path(path, thread_data)
+                artifact_path = artifact_path or _normalize_outputs_artifact_path(path, thread_data)
             # Custom mount paths are resolved by LocalSandbox._resolve_path()
         with get_file_operation_lock(sandbox, path):
             sandbox.write_file(path, content, append)
+        if artifact_path and tool_call_id:
+            return Command(
+                update={
+                    "artifacts": [artifact_path],
+                    "messages": [ToolMessage("OK", tool_call_id=tool_call_id)],
+                },
+            )
         return "OK"
     except SandboxError as e:
         return f"Error: {e}"
@@ -1407,8 +1596,9 @@ def str_replace_tool(
         sandbox = ensure_sandbox_initialized(runtime)
         ensure_thread_directories_exist(runtime)
         requested_path = path
+        thread_data = get_thread_data(runtime)
+        path = _normalize_tool_input_path(path, thread_data)
         if is_local_sandbox(runtime):
-            thread_data = get_thread_data(runtime)
             validate_local_tool_path(path, thread_data)
             if not _is_custom_mount_path(path):
                 path = _resolve_and_validate_user_data_path(path, thread_data)

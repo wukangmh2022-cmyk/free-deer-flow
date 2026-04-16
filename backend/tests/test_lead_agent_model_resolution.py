@@ -112,6 +112,42 @@ def test_make_lead_agent_disables_thinking_when_model_does_not_support_it(monkey
     assert result["model"] is not None
 
 
+def test_make_lead_agent_passes_thread_id_as_openai_user_for_deepseek_web(monkeypatch):
+    app_config = _make_app_config([_make_model("deepseek-web-deerflow-sticky", supports_thinking=True)])
+
+    import deerflow.tools as tools_module
+
+    monkeypatch.setattr(lead_agent_module, "get_app_config", lambda: app_config)
+    monkeypatch.setattr(tools_module, "get_available_tools", lambda **kwargs: [])
+    monkeypatch.setattr(lead_agent_module, "_build_middlewares", lambda config, model_name, agent_name=None: [])
+
+    captured: dict[str, object] = {}
+
+    def _fake_create_chat_model(*, name, thinking_enabled, reasoning_effort=None, model_kwargs=None):
+        captured["name"] = name
+        captured["thinking_enabled"] = thinking_enabled
+        captured["reasoning_effort"] = reasoning_effort
+        captured["model_kwargs"] = model_kwargs
+        return object()
+
+    monkeypatch.setattr(lead_agent_module, "create_chat_model", _fake_create_chat_model)
+    monkeypatch.setattr(lead_agent_module, "create_agent", lambda **kwargs: kwargs)
+
+    lead_agent_module.make_lead_agent(
+        {
+            "configurable": {
+                "thread_id": "thread-123",
+                "model_name": "deepseek-web-deerflow-sticky",
+                "thinking_enabled": True,
+                "is_plan_mode": False,
+                "subagent_enabled": False,
+            }
+        }
+    )
+
+    assert captured["model_kwargs"] == {"user": "thread-123"}
+
+
 def test_build_middlewares_uses_resolved_model_name_for_vision(monkeypatch):
     app_config = _make_app_config(
         [
@@ -129,7 +165,11 @@ def test_build_middlewares_uses_resolved_model_name_for_vision(monkeypatch):
     )
 
     monkeypatch.setattr(lead_agent_module, "get_app_config", lambda: app_config)
-    monkeypatch.setattr(lead_agent_module, "_create_summarization_middleware", lambda: None)
+    monkeypatch.setattr(
+        lead_agent_module,
+        "_create_summarization_middleware",
+        lambda config: None,
+    )
     monkeypatch.setattr(lead_agent_module, "_create_todo_list_middleware", lambda is_plan_mode: None)
 
     middlewares = lead_agent_module._build_middlewares({"configurable": {"model_name": "stale-model", "is_plan_mode": False, "subagent_enabled": False}}, model_name="vision-model", custom_middlewares=[MagicMock()])
@@ -158,8 +198,50 @@ def test_create_summarization_middleware_uses_configured_model_alias(monkeypatch
     monkeypatch.setattr(lead_agent_module, "create_chat_model", _fake_create_chat_model)
     monkeypatch.setattr(lead_agent_module, "SummarizationMiddleware", lambda **kwargs: kwargs)
 
-    middleware = lead_agent_module._create_summarization_middleware()
+    middleware = lead_agent_module._create_summarization_middleware(
+        {"configurable": {}}
+    )
 
     assert captured["name"] == "model-masswork"
     assert captured["thinking_enabled"] is False
     assert middleware["model"] is fake_model
+
+
+def test_create_summarization_middleware_respects_thread_override_enable(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        lead_agent_module,
+        "get_summarization_config",
+        lambda: SummarizationConfig(enabled=False),
+    )
+
+    monkeypatch.setattr(
+        lead_agent_module,
+        "create_chat_model",
+        lambda **kwargs: object(),
+    )
+    monkeypatch.setattr(lead_agent_module, "SummarizationMiddleware", lambda **kwargs: kwargs)
+
+    middleware = lead_agent_module._create_summarization_middleware(
+        {"configurable": {"context_compression_enabled": True}}
+    )
+
+    assert middleware is not None
+    assert middleware["trigger"] == ("messages", 50)
+
+
+def test_create_summarization_middleware_respects_thread_override_disable(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        lead_agent_module,
+        "get_summarization_config",
+        lambda: SummarizationConfig(enabled=True),
+    )
+
+    middleware = lead_agent_module._create_summarization_middleware(
+        {"configurable": {"context_compression_enabled": False}}
+    )
+
+    assert middleware is None

@@ -65,7 +65,7 @@ export function WorkspacePickerDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-2xl">
+      <DialogContent className="max-w-[calc(100vw-2rem)] overflow-hidden sm:max-w-2xl">
         <DialogHeader>
           <DialogTitle>选择工作目录</DialogTitle>
           <DialogDescription>
@@ -73,28 +73,30 @@ export function WorkspacePickerDialog({
           </DialogDescription>
         </DialogHeader>
 
-        <div className="space-y-3">
-          <div className="bg-muted/40 rounded-lg border px-3 py-2 text-sm">
+        <div className="min-w-0 space-y-3">
+          <div className="bg-muted/40 min-w-0 rounded-lg border px-3 py-2 text-sm">
             <div className="text-muted-foreground mb-1 text-xs">当前目录</div>
-            <div className="flex items-center gap-1 overflow-x-auto whitespace-nowrap">
+            <div className="flex min-w-0 items-start gap-2 overflow-hidden">
               <FolderOpenIcon className="text-muted-foreground size-4 shrink-0" />
-              <span className="font-medium">{displayPath}</span>
+              <span className="min-w-0 break-all font-medium whitespace-normal">
+                {displayPath}
+              </span>
             </div>
           </div>
 
-          <ScrollArea className="h-80 rounded-lg border">
-            <div className="p-2">
+          <ScrollArea className="h-80 min-w-0 rounded-lg border">
+            <div className="min-w-0 p-2">
               {parentWorkspace && (
                 <button
                   type="button"
-                  className="hover:bg-muted flex w-full items-center justify-between rounded-md px-3 py-2 text-left text-sm"
+                  className="hover:bg-muted flex min-w-0 w-full items-center justify-between rounded-md px-3 py-2 text-left text-sm"
                   onClick={() => setBrowsingPath(parentWorkspace.host_path)}
                 >
-                  <div className="flex items-center gap-2">
-                    <FolderIcon className="size-4" />
+                  <div className="flex min-w-0 items-center gap-2">
+                    <FolderIcon className="size-4 shrink-0" />
                     <span>..</span>
                   </div>
-                  <span className="text-muted-foreground text-xs">上一级</span>
+                  <span className="text-muted-foreground shrink-0 text-xs">上一级</span>
                 </button>
               )}
 
@@ -103,7 +105,7 @@ export function WorkspacePickerDialog({
                   key={workspace.id}
                   type="button"
                   className={cn(
-                    "hover:bg-muted flex w-full items-center justify-between rounded-md px-3 py-2 text-left text-sm",
+                    "hover:bg-muted flex min-w-0 w-full items-center justify-between rounded-md px-3 py-2 text-left text-sm",
                     currentWorkspace?.id === workspace.id && "bg-muted",
                   )}
                   onClick={() => setBrowsingPath(workspace.host_path)}

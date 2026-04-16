@@ -1,5 +1,6 @@
 import logging
 import os
+import re
 from contextvars import ContextVar
 from pathlib import Path
 from typing import Any, Self
@@ -28,6 +29,7 @@ from deerflow.config.tool_search_config import ToolSearchConfig, load_tool_searc
 load_dotenv()
 
 logger = logging.getLogger(__name__)
+_ENV_NAME_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 def _default_config_candidates() -> tuple[Path, ...]:
@@ -196,7 +198,9 @@ class AppConfig(BaseModel):
     def resolve_env_variables(cls, config: Any) -> Any:
         """Recursively resolve environment variables in the config.
 
-        Environment variables are resolved using the `os.getenv` function. Example: $OPENAI_API_KEY
+        Supported string formats:
+        - `$VAR` or `${VAR}`: required env var
+        - `${VAR:-default}`: env var with fallback default (default can itself be `$OTHER_VAR`)
 
         Args:
             config: The config to resolve environment variables in.
@@ -205,10 +209,33 @@ class AppConfig(BaseModel):
             The config with environment variables resolved.
         """
         if isinstance(config, str):
-            if config.startswith("$"):
-                env_value = os.getenv(config[1:])
+            if config.startswith("${") and config.endswith("}"):
+                expression = config[2:-1]
+                if ":-" in expression:
+                    env_name, fallback = expression.split(":-", 1)
+                    env_name = env_name.strip()
+                    if not _ENV_NAME_PATTERN.match(env_name):
+                        raise ValueError(f"Invalid environment variable expression: {config}")
+                    env_value = os.getenv(env_name)
+                    if env_value is None or env_value == "":
+                        return cls.resolve_env_variables(fallback)
+                    return env_value
+
+                env_name = expression.strip()
+                if not _ENV_NAME_PATTERN.match(env_name):
+                    raise ValueError(f"Invalid environment variable expression: {config}")
+                env_value = os.getenv(env_name)
                 if env_value is None:
-                    raise ValueError(f"Environment variable {config[1:]} not found for config value {config}")
+                    raise ValueError(f"Environment variable {env_name} not found for config value {config}")
+                return env_value
+
+            if config.startswith("$") and len(config) > 1:
+                env_name = config[1:]
+                if not _ENV_NAME_PATTERN.match(env_name):
+                    raise ValueError(f"Invalid environment variable expression: {config}")
+                env_value = os.getenv(env_name)
+                if env_value is None:
+                    raise ValueError(f"Environment variable {env_name} not found for config value {config}")
                 return env_value
             return config
         elif isinstance(config, dict):

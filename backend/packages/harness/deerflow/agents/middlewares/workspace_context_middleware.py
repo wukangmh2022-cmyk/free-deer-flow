@@ -31,6 +31,7 @@ class WorkspaceContextMiddleware(AgentMiddleware[ThreadState]):
         uploads_path: str | None,
         outputs_path: str | None,
     ) -> HumanMessage:
+        del workspace_path, uploads_path, outputs_path
         preferred_workspace_tool_path = workspace_tool_path or "/mnt/user-data/workspace"
         uploads_tool_path = "/mnt/user-data/uploads"
         outputs_tool_path = "/mnt/user-data/outputs"
@@ -40,11 +41,11 @@ class WorkspaceContextMiddleware(AgentMiddleware[ThreadState]):
             content=(
                 "<system_reminder>\n"
                 "This thread already has a bound working directory.\n"
-                f"- User-facing workspace path: `{workspace_path}`\n"
                 f"- Preferred workspace tool path: `{preferred_workspace_tool_path}`\n"
                 f"- Attachment tool path: `{uploads_tool_path}`\n"
                 f"- Output tool path: `{outputs_tool_path}`\n\n"
                 "Always use the preferred workspace tool path in tool calls when you need to inspect or edit the bound workspace.\n"
+                "Do not use host-machine paths such as `/Users/...`, `/home/...`, or `C:\\...` in tool calls unless a tool explicitly returns such a path as its only valid target.\n"
                 "When the user's request plausibly refers to materials already available in this thread — files, directories, documents, datasets, code, outputs, or project contents — "
                 "you should treat the bound workspace as the default target and inspect it directly instead of asking which path to use.\n"
                 "If the user says things like 'this pdf', 'this file', 'the code here', or refers to the current project without naming a path, start with the bound workspace.\n"

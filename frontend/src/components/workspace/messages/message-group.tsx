@@ -7,6 +7,7 @@ import {
   LightbulbIcon,
   ListTodoIcon,
   MessageCircleQuestionMarkIcon,
+  MessageSquareIcon,
   NotebookPenIcon,
   SearchIcon,
   SquareTerminalIcon,
@@ -25,6 +26,7 @@ import { CodeBlock } from "@/components/ai-elements/code-block";
 import { Button } from "@/components/ui/button";
 import { useI18n } from "@/core/i18n/hooks";
 import {
+  extractContentFromMessage,
   extractReasoningContentFromMessage,
   findToolCallResult,
 } from "@/core/messages/utils";
@@ -83,6 +85,7 @@ export function MessageGroup({
   isLoading?: boolean;
 }) {
   const { t } = useI18n();
+  const { workspaceTargetPath, workspaceContainerPath } = useThread();
   const [showAbove, setShowAbove] = useState(
     env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true",
   );
@@ -116,6 +119,18 @@ export function MessageGroup({
       className={cn("w-full gap-2 rounded-lg border p-0.5", className)}
       open={true}
     >
+      {lastToolCallStep && !showAbove && (
+        <ChainOfThoughtContent className="px-4 pb-2">
+          <FlipDisplay uniqueKey={lastToolCallStep.id ?? ""}>
+            <ToolCall
+              key={lastToolCallStep.id}
+              {...lastToolCallStep}
+              isLast={true}
+              isLoading={isLoading}
+            />
+          </FlipDisplay>
+        </ChainOfThoughtContent>
+      )}
       {aboveLastToolCallSteps.length > 0 && (
         <Button
           key="above"
@@ -142,35 +157,48 @@ export function MessageGroup({
           ></ChainOfThoughtStep>
         </Button>
       )}
-      {lastToolCallStep && (
+      {lastToolCallStep && showAbove && (
         <ChainOfThoughtContent className="px-4 pb-2">
-          {showAbove &&
-            aboveLastToolCallSteps.map((step) =>
-              step.type === "reasoning" ? (
-                <ChainOfThoughtStep
-                  key={step.id}
-                  label={
-                    <MarkdownContent
-                      content={step.reasoning ?? ""}
-                      isLoading={isLoading}
-                      rehypePlugins={rehypePlugins}
-                    />
-                  }
-                ></ChainOfThoughtStep>
-              ) : (
-                <ToolCall key={step.id} {...step} isLoading={isLoading} />
-              ),
-            )}
-          {lastToolCallStep && (
-            <FlipDisplay uniqueKey={lastToolCallStep.id ?? ""}>
-              <ToolCall
-                key={lastToolCallStep.id}
-                {...lastToolCallStep}
-                isLast={true}
-                isLoading={isLoading}
+          {aboveLastToolCallSteps.map((step) =>
+            step.type === "reasoning" ? (
+              <ChainOfThoughtStep
+                key={step.id}
+                label={
+                  <MarkdownContent
+                    content={step.reasoning ?? ""}
+                    isLoading={isLoading}
+                    rehypePlugins={rehypePlugins}
+                  />
+                }
+              ></ChainOfThoughtStep>
+            ) : step.type === "assistantContent" ? (
+              <ChainOfThoughtStep
+                key={step.id}
+                icon={MessageSquareIcon}
+                label={
+                  <MarkdownContent
+                    content={mapSandboxTextToWorkspace(
+                      step.content,
+                      workspaceTargetPath,
+                      workspaceContainerPath,
+                    )}
+                    isLoading={isLoading}
+                    rehypePlugins={rehypePlugins}
+                  />
+                }
               />
-            </FlipDisplay>
+            ) : (
+              <ToolCall key={step.id} {...step} isLoading={isLoading} />
+            ),
           )}
+          <FlipDisplay uniqueKey={lastToolCallStep.id ?? ""}>
+            <ToolCall
+              key={lastToolCallStep.id}
+              {...lastToolCallStep}
+              isLast={true}
+              isLoading={isLoading}
+            />
+          </FlipDisplay>
         </ChainOfThoughtContent>
       )}
       {lastReasoningStep && (
@@ -489,13 +517,17 @@ interface CoTReasoningStep extends GenericCoTStep<"reasoning"> {
   reasoning: string | null;
 }
 
+interface CoTAssistantContentStep extends GenericCoTStep<"assistantContent"> {
+  content: string;
+}
+
 interface CoTToolCallStep extends GenericCoTStep<"toolCall"> {
   name: string;
   args: Record<string, unknown>;
-  result?: string;
+  result?: string | Record<string, unknown>;
 }
 
-type CoTStep = CoTReasoningStep | CoTToolCallStep;
+type CoTStep = CoTReasoningStep | CoTAssistantContentStep | CoTToolCallStep;
 
 function convertToSteps(messages: Message[]): CoTStep[] {
   const steps: CoTStep[] = [];
@@ -508,6 +540,16 @@ function convertToSteps(messages: Message[]): CoTStep[] {
           messageId: message.id,
           type: "reasoning",
           reasoning: extractReasoningContentFromMessage(message),
+        };
+        steps.push(step);
+      }
+      const content = extractContentFromMessage(message);
+      if (content && (message.tool_calls?.length ?? 0) > 0) {
+        const step: CoTAssistantContentStep = {
+          id: `${message.id ?? `assistant-content-${steps.length}`}:assistant-content`,
+          messageId: message.id,
+          type: "assistantContent",
+          content,
         };
         steps.push(step);
       }

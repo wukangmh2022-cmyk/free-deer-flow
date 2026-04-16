@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
+from types import SimpleNamespace
+
+import pytest
 
 
 def test_format_sse_basic():
@@ -79,6 +83,29 @@ def test_normalize_input_passthrough():
 
     result = normalize_input({"custom_key": "value"})
     assert result == {"custom_key": "value"}
+
+
+def test_resolve_disconnect_mode_defaults_to_continue_for_resumable_streams():
+    from app.gateway.services import resolve_disconnect_mode
+    from deerflow.runtime import DisconnectMode
+
+    assert resolve_disconnect_mode(None, stream_resumable=True) == DisconnectMode.continue_
+
+
+def test_resolve_disconnect_mode_defaults_to_cancel_for_non_resumable_streams():
+    from app.gateway.services import resolve_disconnect_mode
+    from deerflow.runtime import DisconnectMode
+
+    assert resolve_disconnect_mode(None, stream_resumable=False) == DisconnectMode.cancel
+    assert resolve_disconnect_mode(None, stream_resumable=None) == DisconnectMode.cancel
+
+
+def test_resolve_disconnect_mode_respects_explicit_override():
+    from app.gateway.services import resolve_disconnect_mode
+    from deerflow.runtime import DisconnectMode
+
+    assert resolve_disconnect_mode("continue", stream_resumable=False) == DisconnectMode.continue_
+    assert resolve_disconnect_mode("cancel", stream_resumable=True) == DisconnectMode.cancel
 
 
 def test_build_run_config_basic():
@@ -206,6 +233,7 @@ def test_context_merges_into_configurable():
     context = {
         "model_name": "deepseek-v3",
         "mode": "ultra",
+        "context_compression_enabled": True,
         "reasoning_effort": "high",
         "thinking_enabled": True,
         "is_plan_mode": True,
@@ -217,6 +245,7 @@ def test_context_merges_into_configurable():
     _CONTEXT_CONFIGURABLE_KEYS = {
         "model_name",
         "mode",
+        "context_compression_enabled",
         "thinking_enabled",
         "reasoning_effort",
         "is_plan_mode",
@@ -229,6 +258,7 @@ def test_context_merges_into_configurable():
             configurable.setdefault(key, context[key])
 
     assert config["configurable"]["model_name"] == "deepseek-v3"
+    assert config["configurable"]["context_compression_enabled"] is True
     assert config["configurable"]["thinking_enabled"] is True
     assert config["configurable"]["is_plan_mode"] is True
     assert config["configurable"]["subagent_enabled"] is True
@@ -340,3 +370,136 @@ def test_build_run_config_no_request_config():
     config = build_run_config("thread-abc", None, None)
     assert config["configurable"] == {"thread_id": "thread-abc"}
     assert "context" not in config
+
+
+class _DisconnectingRequest:
+    headers = {}
+
+    async def is_disconnected(self) -> bool:
+        return True
+
+
+@pytest.mark.anyio
+async def test_start_run_defaults_disconnect_mode_from_resumable_stream(monkeypatch: pytest.MonkeyPatch):
+    from app.gateway.routers.thread_runs import RunCreateRequest
+    from app.gateway.services import start_run
+    from deerflow.runtime import DisconnectMode, MemoryStreamBridge, RunManager
+
+    class _CheckpointerStub:
+        async def aget_tuple(self, _config):
+            return None
+
+    async def fake_run_agent(*args, **kwargs):
+        return None
+
+    request = SimpleNamespace(
+        app=SimpleNamespace(
+            state=SimpleNamespace(
+                stream_bridge=MemoryStreamBridge(),
+                run_manager=RunManager(),
+                checkpointer=_CheckpointerStub(),
+                store=None,
+            )
+        )
+    )
+
+    body = RunCreateRequest(
+        input={"messages": [{"role": "user", "content": "继续执行"}]},
+        stream_resumable=True,
+    )
+
+    monkeypatch.setattr("app.gateway.services.run_agent", fake_run_agent)
+    monkeypatch.setattr("app.gateway.services.resolve_agent_factory", lambda _assistant_id: object())
+
+    record = await start_run(body, "thread-continue", request)
+    assert record.on_disconnect == DisconnectMode.continue_
+
+    assert record.task is not None
+    await record.task
+
+
+@pytest.mark.anyio
+async def test_sse_consumer_keeps_run_alive_on_disconnect_for_continue_mode(monkeypatch: pytest.MonkeyPatch):
+    from app.gateway.services import sse_consumer
+    from deerflow.runtime import DisconnectMode, MemoryStreamBridge, RunManager, RunStatus
+
+    bridge = MemoryStreamBridge()
+    run_mgr = RunManager()
+    record = await run_mgr.create("thread-1", on_disconnect=DisconnectMode.continue_)
+    await run_mgr.set_status(record.run_id, RunStatus.running)
+    await bridge.publish(record.run_id, "metadata", {"run_id": record.run_id})
+
+    cancelled: list[str] = []
+
+    async def fake_cancel(run_id: str, *, action: str = "interrupt") -> bool:
+        cancelled.append(f"{run_id}:{action}")
+        return True
+
+    monkeypatch.setattr(run_mgr, "cancel", fake_cancel)
+
+    frames = []
+    async for frame in sse_consumer(bridge, record, _DisconnectingRequest(), run_mgr):
+        frames.append(frame)
+
+    assert frames == []
+    assert cancelled == []
+
+
+@pytest.mark.anyio
+async def test_continue_mode_allows_background_task_to_finish_after_disconnect():
+    from app.gateway.services import sse_consumer
+    from deerflow.runtime import DisconnectMode, MemoryStreamBridge, RunManager, RunStatus
+
+    bridge = MemoryStreamBridge()
+    run_mgr = RunManager()
+    record = await run_mgr.create("thread-1", on_disconnect=DisconnectMode.continue_)
+    await run_mgr.set_status(record.run_id, RunStatus.running)
+
+    completed = asyncio.Event()
+
+    async def background_task():
+        await bridge.publish(record.run_id, "metadata", {"run_id": record.run_id})
+        await asyncio.sleep(0.01)
+        completed.set()
+        await run_mgr.set_status(record.run_id, RunStatus.success)
+        await bridge.publish_end(record.run_id)
+
+    record.task = asyncio.create_task(background_task())
+
+    frames = []
+    async for frame in sse_consumer(bridge, record, _DisconnectingRequest(), run_mgr):
+        frames.append(frame)
+
+    assert frames == []
+
+    await asyncio.wait_for(completed.wait(), timeout=1.0)
+    assert record.task is not None
+    await record.task
+    assert record.status == RunStatus.success
+
+
+@pytest.mark.anyio
+async def test_sse_consumer_cancels_run_on_disconnect_for_cancel_mode(monkeypatch: pytest.MonkeyPatch):
+    from app.gateway.services import sse_consumer
+    from deerflow.runtime import DisconnectMode, MemoryStreamBridge, RunManager, RunStatus
+
+    bridge = MemoryStreamBridge()
+    run_mgr = RunManager()
+    record = await run_mgr.create("thread-1", on_disconnect=DisconnectMode.cancel)
+    await run_mgr.set_status(record.run_id, RunStatus.running)
+    await bridge.publish(record.run_id, "metadata", {"run_id": record.run_id})
+
+    cancelled: list[str] = []
+
+    async def fake_cancel(run_id: str, *, action: str = "interrupt") -> bool:
+        cancelled.append(f"{run_id}:{action}")
+        return True
+
+    monkeypatch.setattr(run_mgr, "cancel", fake_cancel)
+
+    frames = []
+    async for frame in sse_consumer(bridge, record, _DisconnectingRequest(), run_mgr):
+        frames.append(frame)
+
+    assert frames == []
+    assert cancelled == [f"{record.run_id}:interrupt"]

@@ -21,6 +21,7 @@ export interface ThreadWorkspaceMetadata {
 export interface AgentThreadContext extends Record<string, unknown> {
   thread_id: string;
   model_name: string | undefined;
+  context_compression_enabled?: boolean;
   thinking_enabled: boolean;
   is_plan_mode: boolean;
   subagent_enabled: boolean;

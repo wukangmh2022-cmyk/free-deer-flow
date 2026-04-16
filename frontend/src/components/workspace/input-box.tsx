@@ -42,6 +42,7 @@ import {
 } from "@/components/ai-elements/prompt-input";
 import { Button } from "@/components/ui/button";
 import { ConfettiButton } from "@/components/ui/confetti-button";
+import { Switch } from "@/components/ui/switch";
 import {
   Dialog,
   DialogContent,
@@ -58,6 +59,9 @@ import {
 import { getBackendBaseURL } from "@/core/config";
 import { useI18n } from "@/core/i18n/hooks";
 import { useModels } from "@/core/models/hooks";
+import type { Model } from "@/core/models/types";
+import { useSkills } from "@/core/skills/hooks";
+import type { Skill } from "@/core/skills/type";
 import type { AgentThreadContext } from "@/core/threads";
 import { textOfMessage } from "@/core/threads/utils";
 import { cn } from "@/lib/utils";
@@ -85,6 +89,21 @@ import { Tooltip } from "./tooltip";
 
 type InputMode = "flash" | "thinking" | "pro" | "ultra";
 
+function isStickyModelName(modelName: string | undefined): boolean {
+  return typeof modelName === "string" && modelName.includes("sticky");
+}
+
+function getSelectableModels(
+  models: Model[],
+  isNewThread: boolean | undefined,
+): Model[] {
+  if (!isNewThread) {
+    return models;
+  }
+  const nonStickyModels = models.filter((model) => !isStickyModelName(model.name));
+  return nonStickyModels.length > 0 ? nonStickyModels : models;
+}
+
 function getResolvedMode(
   mode: InputMode | undefined,
   supportsThinking: boolean,
@@ -109,8 +128,51 @@ function suggestionsEnabledForModel(modelName: string | undefined): boolean {
   );
 }
 
+function pickDefaultModel(
+  models: Model[],
+  isNewThread: boolean | undefined,
+): Model | undefined {
+  const selectableModels = getSelectableModels(models, isNewThread);
+  if (selectableModels.length === 0) {
+    return undefined;
+  }
+
+  if (isNewThread) {
+    return (
+      selectableModels.find((model) => model.name === "deepseek-web-deerflow") ??
+      selectableModels[0]
+    );
+  }
+
+  return (
+    selectableModels.find(
+      (model) => model.name === "deepseek-web-deerflow-sticky",
+    ) ??
+    selectableModels.find((model) => isStickyModelName(model.name)) ??
+    selectableModels[0]
+  );
+}
+
 function asOptionalString(value: unknown): string | undefined {
   return typeof value === "string" ? value : undefined;
+}
+
+function getSkillSlashCommand(
+  value: string | undefined,
+): { query: string; replaceFrom: number } | null {
+  if (!value) {
+    return null;
+  }
+
+  const match = /(?:^|\n)\/skill(?:\s+([^\n]*))?$/.exec(value);
+  if (!match || match.index === undefined) {
+    return null;
+  }
+
+  return {
+    query: (match[1] ?? "").trim(),
+    replaceFrom: match.index + (match[0].startsWith("\n") ? 1 : 0),
+  };
 }
 
 export function InputBox({
@@ -160,6 +222,7 @@ export function InputBox({
   const searchParams = useSearchParams();
   const [modelDialogOpen, setModelDialogOpen] = useState(false);
   const { models } = useModels();
+  const { skills, isLoading: skillsLoading } = useSkills();
   const { thread, isMock } = useThread();
   const { textInput } = usePromptInputController();
   const promptRootRef = useRef<HTMLDivElement | null>(null);
@@ -174,13 +237,23 @@ export function InputBox({
   const [pendingSuggestion, setPendingSuggestion] = useState<string | null>(
     null,
   );
+  const selectableModels = useMemo(
+    () => getSelectableModels(models, isNewThread),
+    [isNewThread, models],
+  );
 
   useEffect(() => {
-    if (models.length === 0) {
+    if (selectableModels.length === 0) {
       return;
     }
-    const currentModel = models.find((m) => m.name === context.model_name);
-    const fallbackModel = currentModel ?? models[0]!;
+    const currentModel = selectableModels.find(
+      (m) => m.name === context.model_name,
+    );
+    const fallbackModel =
+      currentModel ?? pickDefaultModel(selectableModels, isNewThread);
+    if (!fallbackModel) {
+      return;
+    }
     const supportsThinking = fallbackModel.supports_thinking ?? false;
     const nextModelName = fallbackModel.name;
     const nextMode = getResolvedMode(context.mode, supportsThinking);
@@ -194,14 +267,17 @@ export function InputBox({
       model_name: nextModelName,
       mode: nextMode,
     });
-  }, [context, models, onContextChange]);
+  }, [context, isNewThread, onContextChange, selectableModels]);
 
   const selectedModel = useMemo(() => {
-    if (models.length === 0) {
+    if (selectableModels.length === 0) {
       return undefined;
     }
-    return models.find((m) => m.name === context.model_name) ?? models[0];
-  }, [context.model_name, models]);
+    return (
+      selectableModels.find((m) => m.name === context.model_name) ??
+      pickDefaultModel(selectableModels, isNewThread)
+    );
+  }, [context.model_name, isNewThread, selectableModels]);
 
   const resolvedModelName = selectedModel?.name;
 
@@ -218,10 +294,60 @@ export function InputBox({
     () => suggestionsEnabledForModel(asOptionalString(context.model_name)),
     [context.model_name],
   );
+  const enabledSkills = useMemo(
+    () => skills.filter((skill) => skill.enabled),
+    [skills],
+  );
+  const skillSlashCommand = useMemo(
+    () => getSkillSlashCommand(textInput.value),
+    [textInput.value],
+  );
+  const filteredSkills = useMemo(() => {
+    if (!skillSlashCommand) {
+      return [];
+    }
+
+    const query = skillSlashCommand.query.toLowerCase();
+    return enabledSkills
+      .filter((skill) => {
+        if (!query) {
+          return true;
+        }
+        return (
+          skill.name.toLowerCase().includes(query) ||
+          skill.description.toLowerCase().includes(query)
+        );
+      })
+      .slice(0, 8);
+  }, [enabledSkills, skillSlashCommand]);
+
+  const handleSkillSelect = useCallback(
+    (skill: Skill) => {
+      if (!skillSlashCommand) {
+        return;
+      }
+
+      const currentValue = textInput.value ?? "";
+      const prefix = currentValue.slice(0, skillSlashCommand.replaceFrom);
+      const separator = prefix.length > 0 && !prefix.endsWith("\n") ? "\n" : "";
+      const nextValue = `${prefix}${separator}${t.inputBox.skillCommandTemplate(skill.name, skill.description)}\n`;
+
+      textInput.setInput(nextValue);
+      requestAnimationFrame(() => {
+        const textarea = promptRootRef.current?.querySelector("textarea");
+        if (textarea instanceof HTMLTextAreaElement) {
+          textarea.focus();
+          textarea.selectionStart = nextValue.length;
+          textarea.selectionEnd = nextValue.length;
+        }
+      });
+    },
+    [skillSlashCommand, t.inputBox, textInput],
+  );
 
   const handleModelSelect = useCallback(
     (model_name: string) => {
-      const model = models.find((m) => m.name === model_name);
+      const model = selectableModels.find((m) => m.name === model_name);
       if (!model) {
         return;
       }
@@ -233,7 +359,7 @@ export function InputBox({
       });
       setModelDialogOpen(false);
     },
-    [onContextChange, context, models],
+    [onContextChange, context, selectableModels],
   );
 
   const handleModeSelect = useCallback(
@@ -264,6 +390,16 @@ export function InputBox({
     [onContextChange, context],
   );
 
+  const handleContextCompressionToggle = useCallback(
+    (enabled: boolean) => {
+      onContextChange?.({
+        ...context,
+        context_compression_enabled: enabled,
+      });
+    },
+    [context, onContextChange],
+  );
+
   const handleSubmit = useCallback(
     async (message: PromptInputMessage) => {
       if (status === "streaming") {
@@ -272,6 +408,18 @@ export function InputBox({
       }
       if (!message.text) {
         return;
+      }
+      if (skillSlashCommand) {
+        const exactMatch = filteredSkills.find(
+          (skill) =>
+            skill.name.toLowerCase() === skillSlashCommand.query.toLowerCase(),
+        );
+        const autoSelectedSkill =
+          exactMatch ?? (filteredSkills.length === 1 ? filteredSkills[0] : null);
+        if (autoSelectedSkill) {
+          handleSkillSelect(autoSelectedSkill);
+        }
+        throw new Error("prompt-intercepted-skill-command");
       }
       setFollowups([]);
       setFollowupsHidden(false);
@@ -302,6 +450,9 @@ export function InputBox({
       resolvedModelName,
       selectedModel?.supports_thinking,
       status,
+      filteredSkills,
+      handleSkillSelect,
+      skillSlashCommand,
     ],
   );
 
@@ -528,6 +679,46 @@ export function InputBox({
             defaultValue={initialValue}
           />
         </PromptInputBody>
+        {skillSlashCommand && (
+          <div className="absolute right-3 bottom-full left-3 z-20 mb-2">
+            <div className="bg-popover text-popover-foreground overflow-hidden rounded-xl border shadow-lg">
+              <div className="border-b px-3 py-2">
+                <div className="text-xs font-medium">
+                  {t.inputBox.skillCommandLabel}
+                </div>
+                <div className="text-muted-foreground mt-1 text-[11px]">
+                  {t.inputBox.skillCommandDescription}
+                </div>
+              </div>
+              <div className="max-h-64 overflow-y-auto p-2">
+                {skillsLoading ? (
+                  <div className="text-muted-foreground px-2 py-3 text-sm">
+                    {t.common.loading}
+                  </div>
+                ) : filteredSkills.length === 0 ? (
+                  <div className="text-muted-foreground px-2 py-3 text-sm">
+                    {t.inputBox.skillCommandEmpty}
+                  </div>
+                ) : (
+                  filteredSkills.map((skill) => (
+                    <button
+                      key={skill.name}
+                      type="button"
+                      className="hover:bg-accent hover:text-accent-foreground flex w-full cursor-pointer flex-col items-start rounded-lg px-3 py-2 text-left"
+                      onMouseDown={(event) => event.preventDefault()}
+                      onClick={() => handleSkillSelect(skill)}
+                    >
+                      <span className="text-sm font-medium">{skill.name}</span>
+                      <span className="text-muted-foreground mt-1 text-xs">
+                        {skill.description}
+                      </span>
+                    </button>
+                  ))
+                )}
+              </div>
+            </div>
+          </div>
+        )}
         <PromptInputFooter className="flex">
           <PromptInputTools>
             {/* TODO: Add more connectors here
@@ -829,6 +1020,19 @@ export function InputBox({
             )}
           </PromptInputTools>
           <PromptInputTools>
+            <Tooltip content={t.inputBox.contextCompressionDescription}>
+              <div className="bg-background flex items-center gap-2 rounded-full border px-3 py-1.5">
+                <span className="text-xs font-normal">
+                  {t.inputBox.contextCompression}
+                </span>
+                <Switch
+                  checked={Boolean(context.context_compression_enabled)}
+                  disabled={disabled}
+                  onCheckedChange={handleContextCompressionToggle}
+                  aria-label={t.inputBox.contextCompression}
+                />
+              </div>
+            </Tooltip>
             <ModelSelector
               open={modelDialogOpen}
               onOpenChange={setModelDialogOpen}
@@ -845,7 +1049,7 @@ export function InputBox({
               <ModelSelectorContent>
                 <ModelSelectorInput placeholder={t.inputBox.searchModels} />
                 <ModelSelectorList>
-                  {models.map((m) => (
+                  {selectableModels.map((m) => (
                     <ModelSelectorItem
                       key={m.name}
                       value={m.name}

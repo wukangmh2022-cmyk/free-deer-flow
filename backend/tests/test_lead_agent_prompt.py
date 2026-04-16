@@ -68,6 +68,65 @@ def test_apply_prompt_template_defaults_generic_code_requests_to_workspace(monke
     assert "workspace-relevant requests" in prompt
 
 
+def test_apply_prompt_template_defaults_to_simplified_chinese(monkeypatch):
+    config = SimpleNamespace(
+        sandbox=SimpleNamespace(mounts=[]),
+        skills=SimpleNamespace(container_path="/mnt/skills"),
+    )
+    monkeypatch.setattr("deerflow.config.get_app_config", lambda: config)
+    monkeypatch.setattr(prompt_module, "_get_enabled_skills", lambda: [])
+    monkeypatch.setattr(prompt_module, "get_deferred_tools_prompt_section", lambda: "")
+    monkeypatch.setattr(prompt_module, "_build_acp_section", lambda: "")
+    monkeypatch.setattr(
+        prompt_module,
+        "_get_memory_context",
+        lambda agent_name=None: "",
+    )
+    monkeypatch.setattr(prompt_module, "get_agent_soul", lambda agent_name=None: "")
+
+    prompt = prompt_module.apply_prompt_template()
+
+    assert "respond in Simplified Chinese" in prompt
+
+
+def test_apply_prompt_template_enforces_workspace_search_workflow(monkeypatch):
+    config = SimpleNamespace(
+        sandbox=SimpleNamespace(mounts=[]),
+        skills=SimpleNamespace(container_path="/mnt/skills"),
+    )
+    monkeypatch.setattr("deerflow.config.get_app_config", lambda: config)
+    monkeypatch.setattr(prompt_module, "_get_enabled_skills", lambda: [])
+    monkeypatch.setattr(prompt_module, "get_deferred_tools_prompt_section", lambda: "")
+    monkeypatch.setattr(prompt_module, "_build_acp_section", lambda: "")
+    monkeypatch.setattr(prompt_module, "_get_memory_context", lambda agent_name=None: "")
+    monkeypatch.setattr(prompt_module, "get_agent_soul", lambda agent_name=None: "")
+
+    prompt = prompt_module.apply_prompt_template()
+
+    assert "Repository Investigation First" in prompt
+    assert "summarization|summary|compression|context" in prompt
+    assert "No Filename Guessing" in prompt
+
+
+def test_apply_prompt_template_requires_standalone_visible_answers(monkeypatch):
+    config = SimpleNamespace(
+        sandbox=SimpleNamespace(mounts=[]),
+        skills=SimpleNamespace(container_path="/mnt/skills"),
+    )
+    monkeypatch.setattr("deerflow.config.get_app_config", lambda: config)
+    monkeypatch.setattr(prompt_module, "_get_enabled_skills", lambda: [])
+    monkeypatch.setattr(prompt_module, "get_deferred_tools_prompt_section", lambda: "")
+    monkeypatch.setattr(prompt_module, "_build_acp_section", lambda: "")
+    monkeypatch.setattr(prompt_module, "_get_memory_context", lambda agent_name=None: "")
+    monkeypatch.setattr(prompt_module, "get_agent_soul", lambda agent_name=None: "")
+
+    prompt = prompt_module.apply_prompt_template()
+
+    assert 'Never say "如上"' in prompt
+    assert "hidden tool arguments" in prompt
+    assert "Standalone Delivery" in prompt
+
+
 def test_refresh_skills_system_prompt_cache_async_reloads_immediately(monkeypatch, tmp_path):
     def make_skill(name: str) -> Skill:
         skill_dir = tmp_path / name

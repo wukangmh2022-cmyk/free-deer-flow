@@ -8,6 +8,7 @@ from deerflow.models.deepseek_web_bridge import (
     choose_best_payload_text,
     extract_transport_payload_candidates,
     extract_json_object,
+    is_empty_assistant_payload_text,
     is_placeholder_assistant_payload_text,
     is_suspicious_short_fragment,
     salvage_tool_calls_payload,
@@ -316,6 +317,42 @@ def test_parse_model_payload_keeps_ls_from_real_capture_style_payload():
             },
         }
     ]
+
+
+def test_parse_model_payload_suppresses_empty_object_payload():
+    bridge = DeepSeekWebBridge(sticky_marker="flowflow__system_prompt_v1")
+
+    payload = bridge.parse_model_payload("{}")
+
+    assert payload["content"] == ""
+    assert payload["tool_calls"] == []
+
+
+def test_choose_best_payload_candidate_ignores_schema_example_and_empty_object():
+    candidates = [
+        {
+            "probeId": "schema",
+            "domIndex": 90,
+            "text": '{"content":"string","tool_calls":[{"name":"string","arguments":{},"id":"string"}]}',
+        },
+        {
+            "probeId": "empty",
+            "domIndex": 91,
+            "text": "{}",
+        },
+        {
+            "probeId": "real",
+            "domIndex": 92,
+            "text": '{"content":"先列目录","tool_calls":[{"name":"ls","arguments":{"path":"/mnt/user-data/workspace"},"id":"ls_1"}]}',
+        },
+    ]
+
+    selected = choose_best_payload_candidate(candidates)
+
+    assert selected is not None
+    assert selected["probeId"] == "real"
+    assert is_empty_assistant_payload_text("{}") is True
+    assert is_suspicious_short_fragment("{}") is True
 
 
 def test_parse_model_payload_normalizes_hyphenated_tool_name():

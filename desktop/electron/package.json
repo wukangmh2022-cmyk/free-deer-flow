@@ -1,0 +1,88 @@
+{
+  "name": "deerflowwithdeepseek-desktop",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Electron desktop shell for deerflowwithdeepseek",
+  "main": "main.cjs",
+  "scripts": {
+    "dev": "electron .",
+    "dist:mac": "electron-builder --mac dir",
+    "dist:dmg": "electron-builder --mac dmg",
+    "dist:win:thin": "electron-builder --win nsis --x64 --publish never",
+    "dist:win": "electron-builder --win nsis --x64 --publish never"
+  },
+  "devDependencies": {
+    "electron": "^33.2.1",
+    "electron-builder": "^25.1.8"
+  },
+  "build": {
+    "appId": "com.deerflowwithdeepseek.desktop",
+    "productName": "DeerFlowWithDeepSeek",
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "main.cjs"
+    ],
+    "extraResources": [
+      {
+        "from": "../../backend",
+        "to": "runtime/backend",
+        "filter": [
+          "**/*",
+          "!**/.venv",
+          "!**/.venv/**",
+          "!**/.deer-flow",
+          "!**/.deer-flow/**",
+          "!**/__pycache__",
+          "!**/__pycache__/**",
+          "!**/.pytest_cache",
+          "!**/.pytest_cache/**",
+          "!**/*.pyc",
+          "!**/*.pyo"
+        ]
+      },
+      {
+        "from": "../../frontend",
+        "to": "runtime/frontend",
+        "filter": [
+          "**/*",
+          "!**/node_modules",
+          "!**/node_modules/**",
+          "!**/.next",
+          "!**/.next/**"
+        ]
+      },
+      {
+        "from": "../../scripts",
+        "to": "runtime/scripts"
+      },
+      {
+        "from": "../../config.example.yaml",
+        "to": "runtime/config.example.yaml"
+      }
+    ],
+    "mac": {
+      "target": [
+        "dir"
+      ],
+      "category": "public.app-category.developer-tools"
+    },
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "artifactName": "${productName}-${version}-setup-${arch}.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true
+    }
+  },
+  "packageManager": "pnpm@10.26.2"
+}

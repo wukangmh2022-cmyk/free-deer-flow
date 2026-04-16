@@ -20,6 +20,9 @@ const config = {
     locales: ["en", "zh"],
     defaultLocale: "en",
   },
+  typescript: {
+    ignoreBuildErrors: process.env.DEER_FLOW_IGNORE_BUILD_ERRORS === "1",
+  },
   devIndicators: false,
   async rewrites() {
     const rewrites = [];

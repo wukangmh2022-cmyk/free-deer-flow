@@ -47,6 +47,8 @@ log/
 # pnpm
 .pnpm-store
 sandbox_image_cache.tar
+desktop/electron/node_modules/
+desktop/electron/dist/
 
 # ignore the legacy `web` folder
 web/

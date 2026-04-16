@@ -126,6 +126,9 @@ TOOL_NAME_ALIASES: dict[str, str] = {
     "shell": "Bash",
     "bash": "Bash",
 }
+WINDOWS_COMPAT_ENV = "DEEPSEEK_LOCAL_WINDOWS_COMPAT"
+FORCE_WINDOWS_PATH_ENV = "DEEPSEEK_LOCAL_FORCE_WINDOWS_PATHS"
+WINDOWS_PATH_ARG_KEYS = {"path", "file_path", "cwd", "workdir"}
 
 
 def summarize_tool_calls(tool_calls: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
@@ -803,6 +806,100 @@ def _resolve_declared_tool_name(name: str, schema_map: dict[str, dict[str, Any]]
     return None
 
 
+def _is_windows_compat_enabled() -> bool:
+    return os.name == "nt" or os.environ.get(WINDOWS_COMPAT_ENV, "0").strip() == "1"
+
+
+def _should_force_windows_path_style() -> bool:
+    return os.name == "nt" or os.environ.get(FORCE_WINDOWS_PATH_ENV, "0").strip() == "1"
+
+
+def _normalize_tool_name_key(name: str) -> str:
+    return re.sub(r"[-_\s]+", "", name.lower())
+
+
+def _pick_first_non_empty(mapping: dict[str, Any], candidate_keys: tuple[str, ...]) -> Any:
+    for key in candidate_keys:
+        value = mapping.get(key)
+        if isinstance(value, str):
+            if value.strip():
+                return value
+            continue
+        if value is not None:
+            return value
+    return None
+
+
+def _normalize_windows_path_value(value: Any) -> Any:
+    if not isinstance(value, str):
+        return value
+    raw = value.strip()
+    if not raw:
+        return value
+    # Keep URL-like values intact.
+    if "://" in raw:
+        return value
+    # Normalize slash style for obvious Windows absolute/UNC paths.
+    if re.match(r"^[A-Za-z]:[\\/]", raw) or raw.startswith("\\\\"):
+        return raw.replace("/", "\\")
+    return value
+
+
+def _coerce_tool_arguments_for_compatibility(
+    declared_tool_name: str,
+    arguments: dict[str, Any],
+    schema: dict[str, Any],
+) -> tuple[dict[str, Any], bool]:
+    updated = dict(arguments)
+    rewritten = False
+    key = _normalize_tool_name_key(declared_tool_name)
+
+    if key in {"bash"}:
+        if "command" not in updated:
+            candidate = _pick_first_non_empty(updated, ("cmd", "script", "bash_command", "shell_command"))
+            if isinstance(candidate, str) and candidate.strip():
+                updated["command"] = candidate
+                rewritten = True
+
+    if key in {"execcommand"}:
+        if "cmd" not in updated:
+            candidate = _pick_first_non_empty(updated, ("command", "script", "shell_command"))
+            if isinstance(candidate, str) and candidate.strip():
+                updated["cmd"] = candidate
+                rewritten = True
+
+    if key in {"ls", "listdir", "listdirs"}:
+        if "path" not in updated:
+            candidate = _pick_first_non_empty(updated, ("directory", "dir", "target", "cwd", "workdir"))
+            if isinstance(candidate, str) and candidate.strip():
+                updated["path"] = candidate
+                rewritten = True
+
+    if key in {"readfile", "writefile"}:
+        if "path" not in updated:
+            candidate = _pick_first_non_empty(updated, ("file_path", "filepath", "file", "filename", "target"))
+            if isinstance(candidate, str) and candidate.strip():
+                updated["path"] = candidate
+                rewritten = True
+        if key == "writefile" and "content" not in updated:
+            candidate = _pick_first_non_empty(updated, ("text", "contents", "body", "data"))
+            if isinstance(candidate, str):
+                updated["content"] = candidate
+                rewritten = True
+
+    if _should_force_windows_path_style():
+        properties = schema.get("properties")
+        if isinstance(properties, dict):
+            for prop_key in WINDOWS_PATH_ARG_KEYS:
+                if prop_key in updated and prop_key in properties:
+                    normalized = _normalize_windows_path_value(updated[prop_key])
+                    if normalized != updated[prop_key]:
+                        updated[prop_key] = normalized
+                        rewritten = True
+
+    return updated, rewritten
+
+
 def validate_tool_calls_against_schemas(payload: dict[str, Any], tools: list[dict[str, Any]] | None) -> dict[str, Any]:
     if not isinstance(payload, dict):
         return payload
@@ -839,6 +936,19 @@ def validate_tool_calls_against_schemas(payload: dict[str, Any], tools: list[dic
 
         required = schema.get("required")
         properties = schema.get("properties")
+
+        if _is_windows_compat_enabled():
+            normalized_arguments, compat_rewritten = _coerce_tool_arguments_for_compatibility(
+                resolved_name or name,
+                arguments,
+                schema,
+            )
+            if compat_rewritten:
+                tool_call = dict(tool_call)
+                tool_call["arguments"] = normalized_arguments
+                arguments = normalized_arguments
+                rewritten = True
+
         if isinstance(properties, dict):
             sanitized_arguments = {key: value for key, value in arguments.items() if key in properties}
             if sanitized_arguments.keys() != arguments.keys():
@@ -846,6 +956,7 @@ def validate_tool_calls_against_schemas(payload: dict[str, Any], tools: list[dic
                 tool_call["arguments"] = sanitized_arguments
                 arguments = sanitized_arguments
                 rewritten = True
+
         if isinstance(required, list):
             missing = [key for key in required if key not in arguments]
             if missing:

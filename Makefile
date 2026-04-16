@@ -1,6 +1,6 @@
 # DeerFlow - Unified Development Environment
 
-.PHONY: help config config-upgrade check install dev dev-pro dev-daemon dev-daemon-pro start start-pro start-daemon start-daemon-pro stop up up-pro down clean docker-init docker-start docker-start-pro docker-stop docker-logs docker-logs-frontend docker-logs-gateway desktop-mac desktop-mac-stop
+.PHONY: help config config-upgrade check install dev dev-pro dev-daemon dev-daemon-pro start start-pro start-daemon start-daemon-pro stop up up-pro down clean docker-init docker-start docker-start-pro docker-stop docker-logs docker-logs-frontend docker-logs-gateway desktop-mac desktop-mac-stop desktop-mac-app desktop-electron-install desktop-electron-dev desktop-electron-build
 
 BASH ?= bash
 
@@ -45,6 +45,10 @@ help:
 	@echo "  make docker-logs-gateway - View Docker gateway logs"
 	@echo "  make desktop-mac     - Start local provider + DeerFlow and open app mode on macOS"
 	@echo "  make desktop-mac-stop - Stop local provider + DeerFlow app mode on macOS"
+	@echo "  make desktop-mac-app - Build double-clickable macOS .app launchers"
+	@echo "  make desktop-electron-install - Install Electron desktop dependencies"
+	@echo "  make desktop-electron-dev     - Run Electron desktop shell"
+	@echo "  make desktop-electron-build   - Build Electron .app package (macOS)"
 
 config:
 	@$(PYTHON) ./scripts/configure.py
@@ -240,3 +244,15 @@ desktop-mac:
 
 desktop-mac-stop:
 	@./scripts/stop-mac-desktop.sh
+
+desktop-mac-app:
+	@./scripts/create-mac-desktop-app.sh
+
+desktop-electron-install:
+	@cd desktop/electron && pnpm install
+
+desktop-electron-dev:
+	@cd desktop/electron && pnpm run dev
+
+desktop-electron-build:
+	@cd desktop/electron && pnpm run dist:mac

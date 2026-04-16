@@ -317,11 +317,50 @@ If you want a desktop-like workflow on macOS (one command to start DeerFlow + lo
 make desktop-mac
 ```
 
+In this mode, DeerFlow and the local provider run as managed child processes. Closing the Chrome app window auto-stops both services.
+
 Stop everything:
 
 ```bash
 make desktop-mac-stop
 ```
+
+Build double-clickable macOS launchers (`.app`):
+
+```bash
+make desktop-mac-app
+```
+
+Generated apps:
+
+- `desktop-app/DeerFlowWithDeepSeek.app` (start)
+- `desktop-app/DeerFlowWithDeepSeek Stop.app` (stop)
+
+The generated `.app` launchers run silently in the background (no Terminal popup).
+
+### Electron Desktop (embedded webview, not Chrome app mode)
+
+If you want a true desktop shell (Electron window embedding DeerFlow, not browser app mode):
+
+```bash
+make desktop-electron-install
+make desktop-electron-dev
+```
+
+By default Electron uses a stable startup profile (`dev --gateway`).  
+Set `DEER_FLOW_DESKTOP_PROFILE=low-memory` to try the low-memory profile (`prod --gateway`, with auto fallback to `dev --gateway` if startup fails).
+When backend/provider are already running, Electron reuses them for faster startup.
+Low-memory profile has a slower first cold start because it builds frontend production assets; subsequent starts are faster.
+
+Build a packaged macOS app:
+
+```bash
+make desktop-electron-build
+```
+
+Output path:
+
+- `desktop/electron/dist/mac/DeerFlowWithDeepSeek.app`
 
 Optional environment overrides before start:
 

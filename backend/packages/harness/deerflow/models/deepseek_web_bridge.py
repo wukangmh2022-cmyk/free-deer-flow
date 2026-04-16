@@ -683,6 +683,8 @@ def payload_candidate_score(candidate: dict[str, Any]) -> tuple[int, int, int]:
         return (-9_000, -1, len(stripped))
     if is_prompt_replay_text(stripped):
         return (-8_000, -1, len(stripped))
+    if is_empty_assistant_payload_text(stripped):
+        return (-7_000, -1, len(stripped))
 
     dom_index = candidate.get("domIndex")
     try:
@@ -713,6 +715,8 @@ def choose_best_payload_candidate(candidates: list[dict[str, Any]]) -> dict[str,
         if not stripped:
             continue
         if is_schema_example_payload_text(stripped):
+            continue
+        if is_empty_assistant_payload_text(stripped):
             continue
         dom_index = candidate.get("domIndex")
         probe_id = candidate.get("probeId")
@@ -811,10 +815,25 @@ def is_placeholder_assistant_payload_text(text: str) -> bool:
     return False
 
 
+def is_empty_assistant_payload_text(text: str) -> bool:
+    stripped = text.strip()
+    if not stripped or not stripped.startswith("{"):
+        return False
+
+    try:
+        payload = extract_json_object(stripped)
+    except Exception:
+        payload = None
+
+    return isinstance(payload, dict) and not payload
+
+
 def is_suspicious_short_fragment(text: str) -> bool:
     stripped = text.strip()
     if not stripped:
         return False
+    if is_empty_assistant_payload_text(stripped):
+        return True
     if len(stripped) > 6:
         return False
     if looks_like_assistant_payload_candidate(stripped) or is_assistant_payload_text(stripped):
@@ -2300,6 +2319,9 @@ class DeepSeekWebBridge:
         if is_placeholder_assistant_payload_text(stripped):
             logger.warning("DeepSeek parse_model_payload suppressed placeholder schema payload from model output.")
             return {"content": "", "tool_calls": [], "raw_text": raw_text}
+        if is_empty_assistant_payload_text(stripped):
+            logger.warning("DeepSeek parse_model_payload suppressed empty object payload from model output path.")
+            return {"content": "", "tool_calls": [], "raw_text": raw_text}
 
         if stripped.startswith("{"):
             try:
@@ -2747,31 +2769,29 @@ class DeepSeekWebBridge:
             reverse=True,
         )
         assistant_candidates: list[dict[str, Any]] = []
-        if payload_candidates:
-            for payload_candidate in payload_candidates:
-                probe_id = payload_candidate.get("probeId")
-                if not isinstance(probe_id, str):
-                    continue
-                assistant_candidates.append(
-                    {
-                        "kind": "payload",
-                        "probeId": probe_id,
-                        "text": payload_candidate.get("text", ""),
-                    }
-                )
-        else:
-            for assistant_candidate in sorted(
-                self.assistant_text_candidates(locator),
-                key=assistant_candidate_score,
-                reverse=True,
-            ):
-                assistant_candidates.append(
-                    {
-                        "kind": "locator",
-                        "index": assistant_candidate.get("index"),
-                        "text": assistant_candidate.get("text", ""),
-                    }
-                )
+        for payload_candidate in payload_candidates:
+            probe_id = payload_candidate.get("probeId")
+            if not isinstance(probe_id, str):
+                continue
+            assistant_candidates.append(
+                {
+                    "kind": "payload",
+                    "probeId": probe_id,
+                    "text": payload_candidate.get("text", ""),
+                }
+            )
+        for assistant_candidate in sorted(
+            self.assistant_text_candidates(locator),
+            key=assistant_candidate_score,
+            reverse=True,
+        ):
+            assistant_candidates.append(
+                {
+                    "kind": "locator",
+                    "index": assistant_candidate.get("index"),
+                    "text": assistant_candidate.get("text", ""),
+                }
+            )
 
         for assistant_candidate in assistant_candidates:
             try:

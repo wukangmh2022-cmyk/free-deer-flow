@@ -4,12 +4,26 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DESKTOP_DIR="${ROOT_DIR}/desktop/electron"
 DIST_DIR="${DESKTOP_DIR}/dist"
-VERSION="${1:-$(node -p "require('${DESKTOP_DIR}/package.json').version")}"
-PRODUCT_NAME="$(node -p "require('${DESKTOP_DIR}/package.json').build.productName")"
 UNPACKED_DIR="${DIST_DIR}/win-unpacked"
+
+to_native_path() {
+  local target="$1"
+  if command -v cygpath >/dev/null 2>&1; then
+    cygpath -w "$target"
+  else
+    printf '%s' "$target"
+  fi
+}
+
+DESKTOP_PACKAGE_JSON_NATIVE="$(to_native_path "${DESKTOP_DIR}/package.json")"
+VERSION="${1:-$(DESKTOP_PACKAGE_JSON="${DESKTOP_PACKAGE_JSON_NATIVE}" node -p "require(process.env.DESKTOP_PACKAGE_JSON).version")}"
+PRODUCT_NAME="$(DESKTOP_PACKAGE_JSON="${DESKTOP_PACKAGE_JSON_NATIVE}" node -p "require(process.env.DESKTOP_PACKAGE_JSON).build.productName")"
 RELEASE_NAME="${PRODUCT_NAME}-${VERSION}-windows-x64-portable"
 RELEASE_DIR="${DIST_DIR}/${RELEASE_NAME}"
 ZIP_PATH="${DIST_DIR}/${RELEASE_NAME}.zip"
+PREPARE_PYTHON_RUNTIME_SCRIPT_NATIVE="$(to_native_path "${ROOT_DIR}/scripts/prepare-windows-python-runtime.ps1")"
+RELEASE_DIR_NATIVE="$(to_native_path "${RELEASE_DIR}")"
+ZIP_PATH_NATIVE="$(to_native_path "${ZIP_PATH}")"
 
 if ! command -v pnpm >/dev/null 2>&1; then
   echo "pnpm not found. Please install pnpm first."
@@ -35,7 +49,7 @@ if [ ! -d "node_modules" ]; then
 fi
 
 echo "[build-windows-release] preparing Windows Python runtime..."
-"${POWERSHELL_BIN}" -ExecutionPolicy Bypass -File "${ROOT_DIR}/scripts/prepare-windows-python-runtime.ps1"
+"${POWERSHELL_BIN}" -ExecutionPolicy Bypass -File "${PREPARE_PYTHON_RUNTIME_SCRIPT_NATIVE}"
 
 echo "[build-windows-release] building portable Windows directory..."
 pnpm run dist:win
@@ -66,8 +80,15 @@ EOF
 
 rm -f "${ZIP_PATH}"
 (
-  cd "${DIST_DIR}"
-  "${POWERSHELL_BIN}" -NoProfile -Command "Compress-Archive -Path '${RELEASE_NAME}\\*' -DestinationPath '${ZIP_PATH}' -Force" >/dev/null
+  RELEASE_DIR_NATIVE="${RELEASE_DIR_NATIVE}" ZIP_PATH_NATIVE="${ZIP_PATH_NATIVE}" \
+    "${POWERSHELL_BIN}" -NoProfile -Command '
+      $releaseDir = $env:RELEASE_DIR_NATIVE
+      $zipPath = $env:ZIP_PATH_NATIVE
+      if (Test-Path $zipPath) {
+        Remove-Item -Force $zipPath
+      }
+      Compress-Archive -Path (Join-Path $releaseDir "*") -DestinationPath $zipPath -Force
+    ' >/dev/null
 )
 
 echo "[build-windows-release] build done."

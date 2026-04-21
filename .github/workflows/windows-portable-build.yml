@@ -1,0 +1,129 @@
+name: Windows Portable Build
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Optional version override used in the portable artifact name
+        required: false
+        type: string
+  push:
+    branches:
+      - main
+      - "codex/**"
+    paths:
+      - ".github/workflows/windows-portable-build.yml"
+      - "desktop/electron/**"
+      - "frontend/**"
+      - "backend/**"
+      - "skills/**"
+      - "config.yaml"
+      - "config.example.yaml"
+      - "scripts/build-windows-release.sh"
+      - "scripts/prepare-windows-python-runtime.ps1"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-portable-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-windows-portable:
+    runs-on: windows-latest
+    timeout-minutes: 75
+
+    env:
+      VERSION_OVERRIDE: ${{ github.event.inputs.version || '' }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Enable Windows long paths
+        run: git config --system core.longpaths true
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "pnpm"
+          cache-dependency-path: |
+            frontend/pnpm-lock.yaml
+            desktop/electron/pnpm-lock.yaml
+
+      - name: Enable Corepack
+        run: corepack enable
+
+      - name: Use pinned pnpm version
+        run: corepack prepare pnpm@10.26.2 --activate
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: pnpm install --frozen-lockfile
+
+      - name: Install desktop dependencies
+        working-directory: desktop/electron
+        run: pnpm install --frozen-lockfile
+
+      - name: Build portable Windows release
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -n "${VERSION_OVERRIDE}" ]; then
+            bash ./scripts/build-windows-release.sh "${VERSION_OVERRIDE}"
+          else
+            bash ./scripts/build-windows-release.sh
+          fi
+
+      - name: Resolve artifact paths
+        id: paths
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="${VERSION_OVERRIDE:-$(node -p "require('./desktop/electron/package.json').version")}"
+          RELEASE_NAME="DeerFlowWithDeepSeek-${VERSION}-windows-x64-portable"
+          ZIP_PATH="desktop/electron/dist/${RELEASE_NAME}.zip"
+          RELEASE_DIR="desktop/electron/dist/${RELEASE_NAME}"
+          if [ ! -f "${ZIP_PATH}" ]; then
+            echo "Expected portable zip not found: ${ZIP_PATH}" >&2
+            exit 1
+          fi
+          if [ ! -d "${RELEASE_DIR}" ]; then
+            echo "Expected portable directory not found: ${RELEASE_DIR}" >&2
+            exit 1
+          fi
+          echo "release_name=${RELEASE_NAME}" >> "$GITHUB_OUTPUT"
+          echo "zip_path=${ZIP_PATH}" >> "$GITHUB_OUTPUT"
+          echo "release_dir=${RELEASE_DIR}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload portable zip
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.paths.outputs.release_name }}-zip
+          path: ${{ steps.paths.outputs.zip_path }}
+          if-no-files-found: error
+
+      - name: Upload portable directory
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.paths.outputs.release_name }}-dir
+          path: ${{ steps.paths.outputs.release_dir }}
+          if-no-files-found: error
+
+      - name: Write workflow summary
+        shell: bash
+        run: |
+          {
+            echo "## Windows portable build"
+            echo ""
+            echo "- Portable zip: \`${{ steps.paths.outputs.zip_path }}\`"
+            echo "- Portable dir: \`${{ steps.paths.outputs.release_dir }}\`"
+            echo "- Download both artifacts from this workflow run."
+          } >> "$GITHUB_STEP_SUMMARY"

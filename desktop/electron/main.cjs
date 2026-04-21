@@ -46,6 +46,7 @@ const STATIC_SERVER_ENTRY = app.isPackaged
   ? path.join(process.resourcesPath, "app.asar", "static-server.cjs")
   : path.join(REPO_ROOT, "desktop", "electron", "static-server.cjs");
 const RUNTIME_PYTHON_DIR = path.join(REPO_ROOT, "python");
+const PLAYWRIGHT_BROWSERS_DIR = path.join(RUNTIME_PYTHON_DIR, "ms-playwright");
 const RUNTIME_PYTHON_EXE_CANDIDATES = IS_WINDOWS
   ? [
       path.join(RUNTIME_PYTHON_DIR, "python.exe"),
@@ -145,6 +146,20 @@ const getBundledPythonPath = () =>
 
 const hasBundledPython = () => app.isPackaged && Boolean(getBundledPythonPath());
 
+const getBundledPlaywrightBrowserDir = () => {
+  if (!app.isPackaged) {
+    return null;
+  }
+  if (!fs.existsSync(PLAYWRIGHT_BROWSERS_DIR)) {
+    return null;
+  }
+  const candidates = fs
+    .readdirSync(PLAYWRIGHT_BROWSERS_DIR, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory() && entry.name.startsWith("chromium-"))
+    .map((entry) => path.join(PLAYWRIGHT_BROWSERS_DIR, entry.name));
+  return candidates[0] || null;
+};
+
 const pythonCommandExists = () => commandExists("python3") || commandExists("python");
 
 const resolvePythonRuntime = () => {
@@ -219,6 +234,10 @@ const collectStartupProblems = () => {
     );
   }
 
+  if (app.isPackaged && !getBundledPlaywrightBrowserDir()) {
+    problems.push(`missing bundled Playwright Chromium under ${PLAYWRIGHT_BROWSERS_DIR}`);
+  }
+
   const requiredCommands = [];
   if (!app.isPackaged && !USE_STATIC_FRONTEND) {
     requiredCommands.push("pnpm");
@@ -263,6 +282,9 @@ const spawnLogged = (command, args, cwd, logName, envOverrides = {}) => {
       DEER_FLOW_HOST_SKILLS_PATH:
         process.env.DEER_FLOW_HOST_SKILLS_PATH ||
         (app.isPackaged ? packagedSkillsPath : undefined),
+      PLAYWRIGHT_BROWSERS_PATH:
+        process.env.PLAYWRIGHT_BROWSERS_PATH ||
+        (app.isPackaged ? PLAYWRIGHT_BROWSERS_DIR : undefined),
       ...envOverrides
     },
     stdio: ["ignore", out, out]

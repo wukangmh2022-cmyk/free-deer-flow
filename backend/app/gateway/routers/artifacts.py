@@ -8,6 +8,7 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import FileResponse, PlainTextResponse, Response
 
 from app.gateway.path_utils import resolve_thread_virtual_path
+from deerflow.config.paths import VIRTUAL_PATH_PREFIX
 
 logger = logging.getLogger(__name__)
 
@@ -18,6 +19,7 @@ ACTIVE_CONTENT_MIME_TYPES = {
     "application/xhtml+xml",
     "image/svg+xml",
 }
+OUTPUTS_VIRTUAL_PREFIX = f"{VIRTUAL_PATH_PREFIX}/outputs"
 
 
 def _build_content_disposition(disposition_type: str, filename: str) -> str:
@@ -30,6 +32,80 @@ def _build_attachment_headers(filename: str, extra_headers: dict[str, str] | Non
     if extra_headers:
         headers.update(extra_headers)
     return headers
+
+
+def _outputs_relative_path(virtual_path: str) -> str | None:
+    stripped = virtual_path.lstrip("/")
+    prefix = OUTPUTS_VIRTUAL_PREFIX.lstrip("/")
+    if stripped == prefix:
+        return ""
+    if stripped.startswith(prefix + "/"):
+        return stripped[len(prefix) + 1 :]
+    return None
+
+
+async def _get_thread_outputs_override(request: Request, thread_id: str) -> Path | None:
+    checkpointer = getattr(request.app.state, "checkpointer", None)
+    if checkpointer is None:
+        return None
+
+    config = {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
+    try:
+        checkpoint_tuple = await checkpointer.aget_tuple(config)
+    except Exception:
+        logger.warning("Failed to inspect checkpoint for artifact path override: thread_id=%s", thread_id, exc_info=True)
+        return None
+
+    if checkpoint_tuple is None:
+        return None
+
+    checkpoint = getattr(checkpoint_tuple, "checkpoint", {}) or {}
+    channel_values = checkpoint.get("channel_values", {}) or {}
+    thread_data = channel_values.get("thread_data", {}) or {}
+    outputs_path = thread_data.get("outputs_path")
+    if not isinstance(outputs_path, str) or not outputs_path.strip():
+        return None
+
+    try:
+        return Path(outputs_path).expanduser().resolve()
+    except Exception:
+        logger.warning("Invalid thread_data.outputs_path for artifact request: thread_id=%s outputs_path=%r", thread_id, outputs_path)
+        return None
+
+
+async def _resolve_artifact_host_path(request: Request, thread_id: str, virtual_path: str) -> Path:
+    actual_path = resolve_thread_virtual_path(thread_id, virtual_path)
+    if actual_path.exists():
+        return actual_path
+
+    relative_outputs_path = _outputs_relative_path(virtual_path)
+    if relative_outputs_path is None:
+        return actual_path
+
+    outputs_override = await _get_thread_outputs_override(request, thread_id)
+    if outputs_override is None:
+        return actual_path
+
+    candidate = (outputs_override / relative_outputs_path).resolve() if relative_outputs_path else outputs_override
+    try:
+        candidate.relative_to(outputs_override)
+    except ValueError:
+        logger.warning(
+            "Artifact override path escapes outputs root: thread_id=%s virtual_path=%s outputs_root=%s candidate=%s",
+            thread_id,
+            virtual_path,
+            outputs_override,
+            candidate,
+        )
+        return actual_path
+
+    logger.info(
+        "Falling back to thread_data.outputs_path for artifact lookup: thread_id=%s requested_path=%s fallback_path=%s",
+        thread_id,
+        virtual_path,
+        candidate,
+    )
+    return candidate
 
 
 def is_text_file_by_content(path: Path, sample_size: int = 8192) -> bool:
@@ -122,7 +198,7 @@ async def get_artifact(thread_id: str, path: str, request: Request, download: bo
         skill_file_path = path[: marker_pos + len(".skill")]  # e.g., "mnt/user-data/outputs/my-skill.skill"
         internal_path = path[marker_pos + len(skill_marker) :]  # e.g., "SKILL.md"
 
-        actual_skill_path = resolve_thread_virtual_path(thread_id, skill_file_path)
+        actual_skill_path = await _resolve_artifact_host_path(request, thread_id, skill_file_path)
 
         if not actual_skill_path.exists():
             raise HTTPException(status_code=404, detail=f"Skill file not found: {skill_file_path}")
@@ -152,7 +228,7 @@ async def get_artifact(thread_id: str, path: str, request: Request, download: bo
         except UnicodeDecodeError:
             return Response(content=content, media_type=mime_type or "application/octet-stream", headers=cache_headers)
 
-    actual_path = resolve_thread_virtual_path(thread_id, path)
+    actual_path = await _resolve_artifact_host_path(request, thread_id, path)
 
     logger.info(f"Resolving artifact path: thread_id={thread_id}, requested_path={path}, actual_path={actual_path}")
 

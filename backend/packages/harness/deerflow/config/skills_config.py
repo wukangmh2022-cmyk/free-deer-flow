@@ -1,4 +1,5 @@
 from pathlib import Path
+import os
 
 from pydantic import BaseModel, Field
 
@@ -27,6 +28,9 @@ class SkillsConfig(BaseModel):
         Returns:
             Path to the skills directory
         """
+        if env_path := os.getenv("DEER_FLOW_SKILLS_PATH"):
+            return Path(env_path).resolve()
+
         if self.path:
             # Use configured path (can be absolute or relative)
             path = Path(self.path)

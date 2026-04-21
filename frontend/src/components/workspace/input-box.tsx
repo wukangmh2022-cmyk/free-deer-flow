@@ -89,19 +89,8 @@ import { Tooltip } from "./tooltip";
 
 type InputMode = "flash" | "thinking" | "pro" | "ultra";
 
-function isStickyModelName(modelName: string | undefined): boolean {
-  return typeof modelName === "string" && modelName.includes("sticky");
-}
-
-function getSelectableModels(
-  models: Model[],
-  isNewThread: boolean | undefined,
-): Model[] {
-  if (!isNewThread) {
-    return models;
-  }
-  const nonStickyModels = models.filter((model) => !isStickyModelName(model.name));
-  return nonStickyModels.length > 0 ? nonStickyModels : models;
+function getSelectableModels(models: Model[]): Model[] {
+  return models;
 }
 
 function getResolvedMode(
@@ -132,7 +121,7 @@ function pickDefaultModel(
   models: Model[],
   isNewThread: boolean | undefined,
 ): Model | undefined {
-  const selectableModels = getSelectableModels(models, isNewThread);
+  const selectableModels = getSelectableModels(models);
   if (selectableModels.length === 0) {
     return undefined;
   }
@@ -145,10 +134,7 @@ function pickDefaultModel(
   }
 
   return (
-    selectableModels.find(
-      (model) => model.name === "deepseek-web-deerflow-sticky",
-    ) ??
-    selectableModels.find((model) => isStickyModelName(model.name)) ??
+    selectableModels.find((model) => model.name === "deepseek-web-deerflow") ??
     selectableModels[0]
   );
 }
@@ -238,8 +224,8 @@ export function InputBox({
     null,
   );
   const selectableModels = useMemo(
-    () => getSelectableModels(models, isNewThread),
-    [isNewThread, models],
+    () => getSelectableModels(models),
+    [models],
   );
 
   useEffect(() => {
@@ -752,13 +738,13 @@ export function InputBox({
                       <GraduationCapIcon className="size-3" />
                     )}
                     {context.mode === "ultra" && (
-                      <RocketIcon className="size-3 text-[#dabb5e]" />
+                      <RocketIcon className="text-primary size-3" />
                     )}
                   </div>
                   <div
                     className={cn(
                       "text-xs font-normal",
-                      context.mode === "ultra" ? "golden-text" : "",
+                      context.mode === "ultra" ? "text-primary" : "",
                     )}
                   >
                     {(context.mode === "flash" && t.inputBox.flashMode) ||
@@ -877,12 +863,12 @@ export function InputBox({
                           <RocketIcon
                             className={cn(
                               "mr-2 size-4",
-                              context.mode === "ultra" && "text-[#dabb5e]",
+                              context.mode === "ultra" && "text-primary",
                             )}
                           />
                           <div
                             className={cn(
-                              context.mode === "ultra" && "golden-text",
+                              context.mode === "ultra" && "text-primary",
                             )}
                           >
                             {t.inputBox.ultraMode}

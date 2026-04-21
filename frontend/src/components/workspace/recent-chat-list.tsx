@@ -5,6 +5,7 @@ import {
   FileJson,
   FileText,
   FolderIcon,
+  Minus,
   MoreHorizontal,
   Pencil,
   Plus,
@@ -12,11 +13,19 @@ import {
   Trash2,
 } from "lucide-react";
 import Link from "next/link";
-import { useParams, usePathname, useRouter } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
 import { useCallback, useState } from "react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -37,6 +46,7 @@ import {
   SidebarMenuButton,
   SidebarMenuItem,
 } from "@/components/ui/sidebar";
+import { Switch } from "@/components/ui/switch";
 import { getAPIClient } from "@/core/api";
 import { useI18n } from "@/core/i18n/hooks";
 import {
@@ -58,19 +68,73 @@ import {
 import { env } from "@/env";
 import { isIMEComposing } from "@/lib/ime";
 
+const DELETE_CONFIRM_SUPPRESS_KEY = "deerflow.delete-confirm-suppressed-until";
+const DELETE_CONFIRM_SUPPRESS_MS = 2 * 60 * 60 * 1000;
+
+type DeleteTarget =
+  | {
+      type: "thread";
+      title: string;
+      threadId: string;
+    }
+  | {
+      type: "group";
+      title: string;
+      threadIds: string[];
+    };
+
+function getDeleteConfirmSuppressedUntil(): number {
+  if (typeof window === "undefined") {
+    return 0;
+  }
+
+  const raw = window.localStorage.getItem(DELETE_CONFIRM_SUPPRESS_KEY);
+  if (!raw) {
+    return 0;
+  }
+
+  const value = Number(raw);
+  return Number.isFinite(value) ? value : 0;
+}
+
+function isDeleteConfirmSuppressed(): boolean {
+  return getDeleteConfirmSuppressedUntil() > Date.now();
+}
+
+function setDeleteConfirmSuppressed(enabled: boolean) {
+  if (typeof window === "undefined") {
+    return;
+  }
+
+  if (!enabled) {
+    window.localStorage.removeItem(DELETE_CONFIRM_SUPPRESS_KEY);
+    return;
+  }
+
+  window.localStorage.setItem(
+    DELETE_CONFIRM_SUPPRESS_KEY,
+    String(Date.now() + DELETE_CONFIRM_SUPPRESS_MS),
+  );
+}
+
 export function RecentChatList() {
   const { t } = useI18n();
   const router = useRouter();
   const pathname = usePathname();
-  const { thread_id: threadIdFromPath } = useParams<{ thread_id: string }>();
+  const threadPathMatch = /\/workspace\/(?:agents\/[^/]+\/chats|chats)\/([^/?#]+)/.exec(
+    pathname,
+  );
+  const threadIdFromPath = threadPathMatch?.[1] ?? null;
   const { data: threads = [] } = useThreads();
   const { mutate: deleteThread } = useDeleteThread();
   const { mutate: renameThread } = useRenameThread();
 
   const [renameThreadId, setRenameThreadId] = useState<string | null>(null);
   const [renameValue, setRenameValue] = useState("");
+  const [deleteTarget, setDeleteTarget] = useState<DeleteTarget | null>(null);
+  const [suppressDeleteConfirm, setSuppressDeleteConfirm] = useState(false);
 
-  const handleDelete = useCallback(
+  const executeThreadDelete = useCallback(
     (threadId: string) => {
       deleteThread({ threadId });
       if (threadId === threadIdFromPath) {
@@ -87,6 +151,36 @@ export function RecentChatList() {
       }
     },
     [deleteThread, router, threadIdFromPath, threads],
+  );
+
+  const executeGroupDelete = useCallback(
+    (threadIds: string[]) => {
+      for (const threadId of threadIds) {
+        deleteThread({ threadId });
+      }
+
+      if (threadIds.includes(threadIdFromPath ?? "")) {
+        void router.push("/workspace/chats/new");
+      }
+    },
+    [deleteThread, router, threadIdFromPath],
+  );
+
+  const openDeleteConfirm = useCallback(
+    (target: DeleteTarget) => {
+      if (isDeleteConfirmSuppressed()) {
+        if (target.type === "thread") {
+          executeThreadDelete(target.threadId);
+          return;
+        }
+        executeGroupDelete(target.threadIds);
+        return;
+      }
+
+      setSuppressDeleteConfirm(false);
+      setDeleteTarget(target);
+    },
+    [executeGroupDelete, executeThreadDelete],
   );
 
   const handleRenameClick = useCallback(
@@ -114,6 +208,28 @@ export function RecentChatList() {
     (threadId: string) => renameThreadId === threadId,
     [renameThreadId],
   );
+
+  const handleConfirmDelete = useCallback(() => {
+    if (!deleteTarget) {
+      return;
+    }
+
+    setDeleteConfirmSuppressed(suppressDeleteConfirm);
+
+    if (deleteTarget.type === "thread") {
+      executeThreadDelete(deleteTarget.threadId);
+    } else {
+      executeGroupDelete(deleteTarget.threadIds);
+    }
+
+    setDeleteTarget(null);
+    setSuppressDeleteConfirm(false);
+  }, [
+    deleteTarget,
+    executeGroupDelete,
+    executeThreadDelete,
+    suppressDeleteConfirm,
+  ]);
 
   const handleShare = useCallback(
     async (threadId: string) => {
@@ -211,21 +327,55 @@ export function RecentChatList() {
                       <FolderIcon className="size-3.5" />
                       <span className="truncate">{group.label}</span>
                     </div>
-                    {group.workspacePath ? (
-                      <Button
-                        variant="ghost"
-                        size="icon"
-                        className="text-muted-foreground hover:text-foreground size-6 rounded-md"
-                        asChild
-                      >
-                        <Link
-                          href={`/workspace/chats/new?workspace=${encodeURIComponent(group.workspacePath)}`}
-                          title={`在 ${group.label} 下新建对话`}
+                    <div className="flex items-center gap-1">
+                      <DropdownMenu>
+                        <DropdownMenuTrigger asChild>
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            className="text-muted-foreground hover:text-foreground size-6 rounded-full"
+                          >
+                            <MoreHorizontal className="size-3.5" />
+                            <span className="sr-only">{t.common.more}</span>
+                          </Button>
+                        </DropdownMenuTrigger>
+                        <DropdownMenuContent
+                          className="w-48 rounded-lg"
+                          side="right"
+                          align="start"
                         >
-                          <Plus className="size-3.5" />
-                        </Link>
-                      </Button>
-                    ) : null}
+                          <DropdownMenuItem
+                            onSelect={() =>
+                              openDeleteConfirm({
+                                type: "group",
+                                title: group.label,
+                                threadIds: group.items.map(
+                                  (thread) => thread.thread_id,
+                                ),
+                              })
+                            }
+                          >
+                            <Trash2 className="text-muted-foreground" />
+                            <span>{t.common.delete}</span>
+                          </DropdownMenuItem>
+                        </DropdownMenuContent>
+                      </DropdownMenu>
+                      {group.workspacePath ? (
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          className="text-muted-foreground hover:text-foreground size-6 rounded-full"
+                          asChild
+                        >
+                          <Link
+                            href={`/workspace/chats/new?workspace=${encodeURIComponent(group.workspacePath)}`}
+                            title={`在 ${group.label} 下新建对话`}
+                          >
+                            <Plus className="size-3.5" />
+                          </Link>
+                        </Button>
+                      ) : null}
+                    </div>
                   </div>
                   <div className="border-border/50 ml-3 flex flex-col gap-1 border-l pl-3">
                     {group.items.map((thread) => {
@@ -272,7 +422,7 @@ export function RecentChatList() {
                               <SidebarMenuButton
                                 isActive={isActive}
                                 asChild
-                                className="min-h-8 flex-1 rounded-lg"
+                                className="min-h-8 flex-1 rounded-lg pr-16"
                               >
                                 <Link
                                   className="text-muted-foreground block w-full whitespace-nowrap group-hover/side-menu-item:overflow-hidden"
@@ -291,69 +441,96 @@ export function RecentChatList() {
                               </SidebarMenuButton>
                             )}
                             {env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY !== "true" && (
-                              <DropdownMenu>
-                                <DropdownMenuTrigger asChild>
-                                  <SidebarMenuAction
-                                    showOnHover
-                                    className="bg-background/50 hover:bg-background"
+                              <>
+                                <DropdownMenu>
+                                  <DropdownMenuTrigger asChild>
+                                    <SidebarMenuAction
+                                      showOnHover
+                                      className="bg-muted/35 border-border/35 text-muted-foreground hover:bg-muted/55 hover:text-foreground right-7 rounded-full border shadow-none peer-data-[active=true]/menu-button:opacity-100"
+                                    >
+                                      <MoreHorizontal />
+                                      <span className="sr-only">{t.common.more}</span>
+                                    </SidebarMenuAction>
+                                  </DropdownMenuTrigger>
+                                  <DropdownMenuContent
+                                    className="w-48 rounded-lg"
+                                    side={"right"}
+                                    align={"start"}
                                   >
-                                    <MoreHorizontal />
-                                    <span className="sr-only">{t.common.more}</span>
-                                  </SidebarMenuAction>
-                                </DropdownMenuTrigger>
-                                <DropdownMenuContent
-                                  className="w-48 rounded-lg"
-                                  side={"right"}
-                                  align={"start"}
+                                    <DropdownMenuItem
+                                      onSelect={() =>
+                                        handleRenameClick(
+                                          thread.thread_id,
+                                          currentTitle,
+                                        )
+                                      }
+                                    >
+                                      <Pencil className="text-muted-foreground" />
+                                      <span>{t.common.rename}</span>
+                                    </DropdownMenuItem>
+                                    <DropdownMenuItem
+                                      onSelect={() => handleShare(thread.thread_id)}
+                                    >
+                                      <Share2 className="text-muted-foreground" />
+                                      <span>{t.common.share}</span>
+                                    </DropdownMenuItem>
+                                    <DropdownMenuSub>
+                                      <DropdownMenuSubTrigger>
+                                        <Download className="text-muted-foreground" />
+                                        <span>{t.common.export}</span>
+                                      </DropdownMenuSubTrigger>
+                                      <DropdownMenuSubContent>
+                                        <DropdownMenuItem
+                                          onSelect={() =>
+                                            handleExport(thread, "markdown")
+                                          }
+                                        >
+                                          <FileText className="text-muted-foreground" />
+                                          <span>{t.common.exportAsMarkdown}</span>
+                                        </DropdownMenuItem>
+                                        <DropdownMenuItem
+                                          onSelect={() =>
+                                            handleExport(thread, "json")
+                                          }
+                                        >
+                                          <FileJson className="text-muted-foreground" />
+                                          <span>{t.common.exportAsJSON}</span>
+                                        </DropdownMenuItem>
+                                      </DropdownMenuSubContent>
+                                    </DropdownMenuSub>
+                                    <DropdownMenuSeparator />
+                                    <DropdownMenuItem
+                                      onSelect={() =>
+                                        openDeleteConfirm({
+                                          type: "thread",
+                                          title: currentTitle,
+                                          threadId: thread.thread_id,
+                                        })
+                                      }
+                                    >
+                                      <Trash2 className="text-muted-foreground" />
+                                      <span>{t.common.delete}</span>
+                                    </DropdownMenuItem>
+                                  </DropdownMenuContent>
+                                </DropdownMenu>
+                                <SidebarMenuAction
+                                  showOnHover
+                                  className="bg-muted/35 border-border/35 text-muted-foreground hover:bg-muted/55 hover:text-destructive right-1 rounded-full border shadow-none peer-data-[active=true]/menu-button:opacity-100"
+                                  onClick={(event) => {
+                                    event.preventDefault();
+                                    event.stopPropagation();
+                                    openDeleteConfirm({
+                                      type: "thread",
+                                      title: currentTitle,
+                                      threadId: thread.thread_id,
+                                    });
+                                  }}
+                                  title={t.common.delete}
                                 >
-                                  <DropdownMenuItem
-                                    onSelect={() =>
-                                      handleRenameClick(
-                                        thread.thread_id,
-                                        currentTitle,
-                                      )
-                                    }
-                                  >
-                                    <Pencil className="text-muted-foreground" />
-                                    <span>{t.common.rename}</span>
-                                  </DropdownMenuItem>
-                                  <DropdownMenuItem
-                                    onSelect={() => handleShare(thread.thread_id)}
-                                  >
-                                    <Share2 className="text-muted-foreground" />
-                                    <span>{t.common.share}</span>
-                                  </DropdownMenuItem>
-                                  <DropdownMenuSub>
-                                    <DropdownMenuSubTrigger>
-                                      <Download className="text-muted-foreground" />
-                                      <span>{t.common.export}</span>
-                                    </DropdownMenuSubTrigger>
-                                    <DropdownMenuSubContent>
-                                      <DropdownMenuItem
-                                        onSelect={() =>
-                                          handleExport(thread, "markdown")
-                                        }
-                                      >
-                                        <FileText className="text-muted-foreground" />
-                                        <span>{t.common.exportAsMarkdown}</span>
-                                      </DropdownMenuItem>
-                                      <DropdownMenuItem
-                                        onSelect={() => handleExport(thread, "json")}
-                                      >
-                                        <FileJson className="text-muted-foreground" />
-                                        <span>{t.common.exportAsJSON}</span>
-                                      </DropdownMenuItem>
-                                    </DropdownMenuSubContent>
-                                  </DropdownMenuSub>
-                                  <DropdownMenuSeparator />
-                                  <DropdownMenuItem
-                                    onSelect={() => handleDelete(thread.thread_id)}
-                                  >
-                                    <Trash2 className="text-muted-foreground" />
-                                    <span>{t.common.delete}</span>
-                                  </DropdownMenuItem>
-                                </DropdownMenuContent>
-                              </DropdownMenu>
+                                  <Minus />
+                                  <span className="sr-only">{t.common.delete}</span>
+                                </SidebarMenuAction>
+                              </>
                             )}
                           </div>
                         </SidebarMenuItem>
@@ -366,6 +543,57 @@ export function RecentChatList() {
           </SidebarMenu>
         </SidebarGroupContent>
       </SidebarGroup>
+      <Dialog
+        open={deleteTarget !== null}
+        onOpenChange={(open) => {
+          if (!open) {
+            setDeleteTarget(null);
+            setSuppressDeleteConfirm(false);
+          }
+        }}
+      >
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>
+              {deleteTarget?.type === "group" ? "删除这个分组？" : "删除这个对话？"}
+            </DialogTitle>
+            <DialogDescription>
+              {deleteTarget?.type === "group"
+                ? `这会删除“${deleteTarget.title}”下的 ${deleteTarget.threadIds.length} 个对话，且不可撤销。`
+                : deleteTarget
+                  ? `这会删除对话“${deleteTarget.title}”，且不可撤销。`
+                  : "此操作不可撤销。"}
+            </DialogDescription>
+          </DialogHeader>
+          <div className="bg-muted/40 flex items-center justify-between gap-3 rounded-lg border px-4 py-3">
+            <div className="space-y-0.5">
+              <div className="text-sm font-medium">2 小时内不再提醒</div>
+              <p className="text-muted-foreground text-xs">
+                开启后，接下来 2 小时内删除时将直接执行。
+              </p>
+            </div>
+            <Switch
+              checked={suppressDeleteConfirm}
+              onCheckedChange={setSuppressDeleteConfirm}
+              aria-label="2 小时内不再提醒"
+            />
+          </div>
+          <DialogFooter>
+            <Button
+              variant="secondary"
+              onClick={() => {
+                setDeleteTarget(null);
+                setSuppressDeleteConfirm(false);
+              }}
+            >
+              {t.common.cancel}
+            </Button>
+            <Button variant="destructive" onClick={handleConfirmDelete}>
+              {t.common.delete}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </>
   );
 }

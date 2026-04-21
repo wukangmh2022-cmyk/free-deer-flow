@@ -5,7 +5,6 @@ import {
   EyeIcon,
   LoaderIcon,
   PackageIcon,
-  SquareArrowOutUpRightIcon,
   XIcon,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
@@ -83,7 +82,7 @@ export function ArtifactFileDetail({
   const isSupportPreview = useMemo(() => {
     return language === "html" || language === "markdown";
   }, [language]);
-  const { content, url } = useArtifactContent({
+  const { content, url, error } = useArtifactContent({
     threadId,
     filepath: filepathFromProps,
     enabled: isCodeFile && !isWriteFile,
@@ -187,21 +186,6 @@ export function ArtifactFileDetail({
                 />
               </Tooltip>
             )}
-            {!isWriteFile && (
-              <ArtifactAction
-                icon={SquareArrowOutUpRightIcon}
-                label={t.common.openInNewWindow}
-                tooltip={t.common.openInNewWindow}
-                onClick={() => {
-                  const w = window.open(
-                    urlOfArtifact({ filepath, threadId }),
-                    "_blank",
-                    "noopener,noreferrer",
-                  );
-                  if (w) w.opener = null;
-                }}
-              />
-            )}
             {isCodeFile && (
               <ArtifactAction
                 icon={CopyIcon}
@@ -244,7 +228,13 @@ export function ArtifactFileDetail({
         </div>
       </ArtifactHeader>
       <ArtifactContent className="p-0">
+        {error && (
+          <div className="text-destructive p-4 text-sm">
+            {error instanceof Error ? error.message : "Failed to load artifact"}
+          </div>
+        )}
         {isSupportPreview &&
+          !error &&
           viewMode === "preview" &&
           (language === "markdown" || language === "html") && (
             <ArtifactFilePreview
@@ -253,15 +243,15 @@ export function ArtifactFileDetail({
               language={language ?? "text"}
               url={url}
             />
-          )}
-        {isCodeFile && viewMode === "code" && (
+        )}
+        {isCodeFile && !error && viewMode === "code" && (
           <CodeEditor
             className="size-full resize-none rounded-none border-none"
             value={displayContent ?? ""}
             readonly
           />
         )}
-        {!isCodeFile && (
+        {!isCodeFile && !error && (
           <iframe
             className="size-full"
             src={urlOfArtifact({ filepath, threadId, isMock })}

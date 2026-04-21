@@ -8,7 +8,12 @@ from pydantic import BaseModel, Field
 
 from app.gateway.path_utils import resolve_thread_virtual_path
 from deerflow.agents.lead_agent.prompt import refresh_skills_system_prompt_cache_async
-from deerflow.config.extensions_config import ExtensionsConfig, SkillStateConfig, get_extensions_config, reload_extensions_config
+from deerflow.config.extensions_config import (
+    SkillStateConfig,
+    ensure_extensions_config_path,
+    get_extensions_config,
+    reload_extensions_config,
+)
 from deerflow.skills import Skill, load_skills
 from deerflow.skills.installer import SkillAlreadyExistsError, install_skill_from_archive
 from deerflow.skills.manager import (
@@ -320,10 +325,8 @@ async def update_skill(skill_name: str, request: SkillUpdateRequest) -> SkillRes
         if skill is None:
             raise HTTPException(status_code=404, detail=f"Skill '{skill_name}' not found")
 
-        config_path = ExtensionsConfig.resolve_config_path()
-        if config_path is None:
-            config_path = Path.cwd().parent / "extensions_config.json"
-            logger.info(f"No existing extensions config found. Creating new config at: {config_path}")
+        config_path = ensure_extensions_config_path()
+        logger.info(f"Using extensions config path: {config_path}")
 
         extensions_config = get_extensions_config()
         extensions_config.skills[skill_name] = SkillStateConfig(enabled=request.enabled)

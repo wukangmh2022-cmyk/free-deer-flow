@@ -67,6 +67,19 @@ class ExtensionsConfig(BaseModel):
     model_config = ConfigDict(extra="allow", populate_by_name=True)
 
     @classmethod
+    def default_config_path(cls) -> Path:
+        """Return a writable default path for extensions config creation."""
+        if env_path := os.getenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH"):
+            return Path(env_path)
+
+        if env_home := os.getenv("DEER_FLOW_HOME"):
+            return Path(env_home) / "extensions_config.json"
+
+        backend_dir = Path(__file__).resolve().parents[4]
+        repo_root = backend_dir.parent
+        return repo_root / "extensions_config.json"
+
+    @classmethod
     def resolve_config_path(cls, config_path: str | None = None) -> Path | None:
         """Resolve the extensions config file path.
 
@@ -254,3 +267,11 @@ def set_extensions_config(config: ExtensionsConfig) -> None:
     """
     global _extensions_config
     _extensions_config = config
+
+
+def ensure_extensions_config_path(config_path: str | None = None) -> Path:
+    """Return an existing config path or a sensible writable default."""
+    resolved = ExtensionsConfig.resolve_config_path(config_path)
+    if resolved is not None:
+        return resolved
+    return ExtensionsConfig.default_config_path()

@@ -30,7 +30,6 @@ import { TokenUsageIndicator } from "@/components/workspace/token-usage-indicato
 import { Welcome } from "@/components/workspace/welcome";
 import { WorkspacePickerDialog } from "@/components/workspace/workspace-picker-dialog";
 import { useI18n } from "@/core/i18n/hooks";
-import { useModels } from "@/core/models/hooks";
 import { useNotification } from "@/core/notification/hooks";
 import { useThreadSettings } from "@/core/settings";
 import { mirrorThreadFiles } from "@/core/thread-files/api";
@@ -39,32 +38,10 @@ import { textOfMessage, workspaceMetadataOfThread } from "@/core/threads/utils";
 import { uuid } from "@/core/utils/uuid";
 import { useWorkspaces } from "@/core/workspaces";
 import type { Workspace } from "@/core/workspaces/types";
+import { getBackendBaseURL } from "@/core/config";
 import { env } from "@/env";
 import { cn } from "@/lib/utils";
 import type { AgentThreadState } from "@/core/threads";
-
-function resolveStickyModelName(
-  modelName: string | undefined,
-  availableModelNames: Set<string>,
-): string | undefined {
-  if (!modelName) {
-    return undefined;
-  }
-  if (modelName.includes("sticky")) {
-    return modelName;
-  }
-  const directStickyName = `${modelName}-sticky`;
-  if (availableModelNames.has(directStickyName)) {
-    return directStickyName;
-  }
-  if (
-    modelName === "deepseek-web-deerflow" &&
-    availableModelNames.has("deepseek-web-deerflow-sticky")
-  ) {
-    return "deepseek-web-deerflow-sticky";
-  }
-  return undefined;
-}
 
 export default function ChatPage() {
   const { t } = useI18n();
@@ -75,7 +52,6 @@ export default function ChatPage() {
   const [settings, setSettings] = useThreadSettings(threadId);
   const [mounted, setMounted] = useState(false);
   const { workspaces } = useWorkspaces();
-  const { models } = useModels();
   const threadRecordQuery = useThreadRecord(isNewThread ? undefined : threadId);
   const threadRecord = threadRecordQuery.data;
   const resolvedThreadId =
@@ -88,14 +64,8 @@ export default function ChatPage() {
   const retryContinueRef = useRef<(() => void) | null>(null);
   const retriedHumanMessageIdsRef = useRef<Set<string>>(new Set());
   const outputSyncTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const pendingStickyPromotionThreadIdRef = useRef<string | null>(null);
+  const pendingInitialMessageRef = useRef<PromptInputMessage | null>(null);
   useSpecificChatMode();
-
-  const availableModelNamesRef = useRef<Set<string>>(new Set());
-
-  useEffect(() => {
-    availableModelNamesRef.current = new Set(models.map((model) => model.name));
-  }, [models]);
 
   useEffect(() => {
     setMounted(true);
@@ -184,10 +154,8 @@ export default function ChatPage() {
     context: settings.context,
     isMock,
     initialThreadMetadata: buildWorkspaceContext(),
+    autoCreateOnFirstSubmit: false,
     onStart: (createdThreadId) => {
-      pendingStickyPromotionThreadIdRef.current = isNewThread
-        ? createdThreadId
-        : null;
       setThreadId(createdThreadId);
       setIsNewThread(false);
       // ! Important: Never use next.js router for navigation in this case, otherwise it will cause the thread to re-mount and lose all states. Use native history API instead.
@@ -242,23 +210,6 @@ export default function ChatPage() {
           () => {},
         );
       }
-
-      if (pendingStickyPromotionThreadIdRef.current !== threadId) {
-        return;
-      }
-
-      const stickyModelName = resolveStickyModelName(
-        settings.context.model_name,
-        availableModelNamesRef.current,
-      );
-      pendingStickyPromotionThreadIdRef.current = null;
-      if (!stickyModelName || stickyModelName === settings.context.model_name) {
-        return;
-      }
-      setSettings("context", {
-        ...settings.context,
-        model_name: stickyModelName,
-      });
     },
     onToolEnd: ({ name }) => {
       const currentWorkspacePath =
@@ -312,6 +263,47 @@ export default function ChatPage() {
     (message: PromptInputMessage) => {
       const workspaceContext = buildWorkspaceContext();
       void (async () => {
+        if (isNewThread || !resolvedThreadId) {
+          const createdThreadId = threadId;
+          pendingInitialMessageRef.current = message;
+          try {
+            const response = await fetch(`${getBackendBaseURL()}/api/threads`, {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json",
+              },
+              body: JSON.stringify({
+                thread_id: createdThreadId,
+                metadata: workspaceContext ?? {},
+              }),
+            });
+
+            if (!response.ok && response.status !== 409) {
+              const error = await response
+                .json()
+                .catch(() => ({ detail: "Failed to create thread." }));
+              throw new Error(error.detail ?? "Failed to create thread.");
+            }
+
+            setThreadId(createdThreadId);
+            setIsNewThread(false);
+            history.replaceState(
+              null,
+              "",
+              `/workspace/chats/${createdThreadId}`,
+            );
+            return;
+          } catch (error) {
+            pendingInitialMessageRef.current = null;
+            toast.error(
+              error instanceof Error
+                ? error.message
+                : "创建对话失败。",
+            );
+            return;
+          }
+        }
+
         await sendMessage(threadId, message, workspaceContext);
         if (workspaceContext?.workspace_path?.trim()) {
           await mirrorThreadFiles(
@@ -322,8 +314,29 @@ export default function ChatPage() {
         }
       })();
     },
-    [buildWorkspaceContext, sendMessage, threadId],
+    [buildWorkspaceContext, isNewThread, resolvedThreadId, sendMessage, threadId],
   );
+
+  useEffect(() => {
+    if (isNewThread || !resolvedThreadId || !pendingInitialMessageRef.current) {
+      return;
+    }
+
+    const pendingMessage = pendingInitialMessageRef.current;
+    pendingInitialMessageRef.current = null;
+    const workspaceContext = buildWorkspaceContext();
+
+    void (async () => {
+      await sendMessage(resolvedThreadId, pendingMessage, workspaceContext);
+      if (workspaceContext?.workspace_path?.trim()) {
+        await mirrorThreadFiles(
+          resolvedThreadId,
+          "uploads",
+          workspaceContext.workspace_path,
+        ).catch(() => {});
+      }
+    })();
+  }, [buildWorkspaceContext, isNewThread, resolvedThreadId, sendMessage]);
   const handleStop = useCallback(async () => {
     await thread.stop();
   }, [thread]);

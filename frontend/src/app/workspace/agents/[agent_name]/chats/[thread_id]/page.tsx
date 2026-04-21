@@ -1,7 +1,7 @@
 "use client";
 
 import { BotIcon, PlusSquare } from "lucide-react";
-import { useParams, useRouter } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
 import { useCallback, useRef, useState } from "react";
 import { useEffect } from "react";
 import { toast } from "sonner";
@@ -41,10 +41,9 @@ export default function AgentChatPage() {
   const { t } = useI18n();
   const [showFollowups, setShowFollowups] = useState(false);
   const router = useRouter();
-
-  const { agent_name } = useParams<{
-    agent_name: string;
-  }>();
+  const pathname = usePathname();
+  const agent_name =
+    pathname.match(/\/workspace\/agents\/([^/]+)\/chats\/[^/]+/)?.[1] ?? "__desktop_agent__";
 
   const { agent } = useAgent(agent_name);
 

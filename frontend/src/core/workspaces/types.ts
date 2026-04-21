@@ -13,3 +13,8 @@ export interface WorkspaceBrowseResponse {
   children: Workspace[];
   entries: Workspace[];
 }
+
+export interface CreateWorkspaceFolderRequest {
+  path: string;
+  name: string;
+}

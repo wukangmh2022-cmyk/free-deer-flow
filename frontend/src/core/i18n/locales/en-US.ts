@@ -418,13 +418,23 @@ export const enUS: Translations = {
     appearance: {
       themeTitle: "Theme",
       themeDescription:
-        "Choose how the interface follows your device or stays fixed.",
+        "Choose day mode, night mode, or follow the system automatically.",
+      colorThemeTitle: "Color theme",
+      colorThemeDescription:
+        "Choose the overall interface palette used across DeerFlow.",
+      warm: "Warm",
+      warmDescription:
+        "Keeps the current warm, slightly amber visual direction.",
+      stone: "Stone",
+      stoneDescription: "A restrained gray-and-white palette.",
+      blue: "Blue",
+      blueDescription: "A clean blue-and-white palette with cooler accents.",
       system: "System",
-      light: "Light",
-      dark: "Dark",
+      light: "Day",
+      dark: "Night",
       systemDescription: "Match the operating system preference automatically.",
-      lightDescription: "Bright palette with higher contrast for daytime.",
-      darkDescription: "Dim palette that reduces glare for focus.",
+      lightDescription: "A bright interface mode designed for daytime use.",
+      darkDescription: "A darker interface mode that reduces glare.",
       languageTitle: "Language",
       languageDescription: "Switch between languages.",
     },

@@ -1,8 +1,16 @@
 "use client";
 
-import { useQuery } from "@tanstack/react-query";
-import { CheckIcon, ChevronRightIcon, FolderIcon, FolderOpenIcon } from "lucide-react";
+import { useMutation, useQuery } from "@tanstack/react-query";
+import {
+  CheckIcon,
+  ChevronRightIcon,
+  FolderIcon,
+  FolderOpenIcon,
+  FolderPlusIcon,
+  Loader2Icon,
+} from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
+import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -13,8 +21,12 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { browseWorkspace } from "@/core/workspaces/api";
+import {
+  browseWorkspace,
+  createWorkspaceFolder,
+} from "@/core/workspaces/api";
 import type { Workspace } from "@/core/workspaces/types";
 import { cn } from "@/lib/utils";
 
@@ -35,6 +47,8 @@ export function WorkspacePickerDialog({
 }: WorkspacePickerDialogProps) {
   const initialWorkspace = value ?? fallbackWorkspace;
   const [browsingPath, setBrowsingPath] = useState<string | null>(null);
+  const [createFolderOpen, setCreateFolderOpen] = useState(false);
+  const [newFolderName, setNewFolderName] = useState("");
 
   useEffect(() => {
     if (!open) {
@@ -43,12 +57,45 @@ export function WorkspacePickerDialog({
     setBrowsingPath((value ?? fallbackWorkspace)?.host_path ?? null);
   }, [fallbackWorkspace, open, value]);
 
-  const { data, isLoading } = useQuery({
+  useEffect(() => {
+    if (!open) {
+      setCreateFolderOpen(false);
+      setNewFolderName("");
+    }
+  }, [open]);
+
+  const browseQuery = useQuery({
     queryKey: ["workspaces", "browse", browsingPath],
     enabled: open && Boolean(browsingPath),
     queryFn: async () => browseWorkspace(browsingPath!),
   });
 
+  const createFolderMutation = useMutation({
+    mutationFn: async () => {
+      if (!browsingPath) {
+        throw new Error("当前目录不可用。");
+      }
+      return createWorkspaceFolder({
+        path: browsingPath,
+        name: newFolderName,
+      });
+    },
+    onSuccess: async (workspace) => {
+      toast.success(`已创建文件夹 ${workspace.label}`);
+      setCreateFolderOpen(false);
+      setNewFolderName("");
+      await browseQuery.refetch();
+      setBrowsingPath(workspace.host_path);
+    },
+    onError: (error) => {
+      toast.error(
+        error instanceof Error ? error.message : "创建文件夹失败。",
+      );
+    },
+  });
+
+  const data = browseQuery.data;
+  const isLoading = browseQuery.isLoading;
   const currentWorkspace = data?.current ?? initialWorkspace;
   const parentWorkspace = data?.parent ?? null;
   const children = data?.children ?? [];
@@ -74,6 +121,59 @@ export function WorkspacePickerDialog({
         </DialogHeader>
 
         <div className="min-w-0 space-y-3">
+          <div className="flex items-center justify-between gap-3">
+            <div className="text-muted-foreground text-xs">
+              在当前目录中浏览或新建子文件夹
+            </div>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={() => setCreateFolderOpen((value) => !value)}
+              disabled={!currentWorkspace || createFolderMutation.isPending}
+            >
+              <FolderPlusIcon className="size-4" />
+              新建文件夹
+            </Button>
+          </div>
+
+          {createFolderOpen && (
+            <div className="bg-muted/40 rounded-lg border p-3">
+              <div className="flex flex-col gap-3 sm:flex-row">
+                <Input
+                  value={newFolderName}
+                  onChange={(event) => setNewFolderName(event.target.value)}
+                  placeholder="输入新文件夹名称"
+                  disabled={createFolderMutation.isPending}
+                  onKeyDown={(event) => {
+                    if (
+                      event.key === "Enter" &&
+                      newFolderName.trim() &&
+                      !createFolderMutation.isPending
+                    ) {
+                      event.preventDefault();
+                      createFolderMutation.mutate();
+                    }
+                  }}
+                />
+                <Button
+                  type="button"
+                  onClick={() => createFolderMutation.mutate()}
+                  disabled={
+                    !newFolderName.trim() || createFolderMutation.isPending
+                  }
+                >
+                  {createFolderMutation.isPending ? (
+                    <Loader2Icon className="size-4 animate-spin" />
+                  ) : (
+                    <FolderPlusIcon className="size-4" />
+                  )}
+                  创建
+                </Button>
+              </div>
+            </div>
+          )}
+
           <div className="bg-muted/40 min-w-0 rounded-lg border px-3 py-2 text-sm">
             <div className="text-muted-foreground mb-1 text-xs">当前目录</div>
             <div className="flex min-w-0 items-start gap-2 overflow-hidden">

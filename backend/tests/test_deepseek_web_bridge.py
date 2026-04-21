@@ -1,4 +1,5 @@
 import json
+from types import SimpleNamespace
 
 from deerflow.models.deepseek_web_bridge import (
     DeepSeekWebBridge,
@@ -102,6 +103,106 @@ def test_thinking_candidate_state_detects_deepseek_toggle_selection():
         )
         is False
     )
+
+
+def test_expert_candidate_state_detects_deepseek_toggle_selection():
+    bridge = DeepSeekWebBridge(sticky_marker="flowflow__system_prompt_v1")
+
+    assert (
+        bridge._expert_mode_candidate_state(  # noqa: SLF001
+            {
+                "className": "ds-atom-button ds-toggle-button ds-toggle-button--selected ds-toggle-button--md",
+            }
+        )
+        is True
+    )
+    assert (
+        bridge._expert_mode_candidate_state(  # noqa: SLF001
+            {
+                "className": "ds-atom-button ds-toggle-button ds-toggle-button--md",
+            }
+        )
+        is False
+    )
+
+
+def test_resolve_expert_mode_state_uses_expert_and_fast_radio_options():
+    bridge = DeepSeekWebBridge(sticky_marker="flowflow__system_prompt_v1")
+
+    assert (
+        bridge._resolve_expert_mode_state(  # noqa: SLF001
+            expert_candidate={"ariaChecked": "true"},
+            fast_candidate={"ariaChecked": "false"},
+        )
+        is True
+    )
+    assert (
+        bridge._resolve_expert_mode_state(  # noqa: SLF001
+            expert_candidate={"ariaChecked": "false"},
+            fast_candidate={"ariaChecked": "true"},
+        )
+        is False
+    )
+
+
+def test_inspect_expert_mode_reads_radiogroup_candidates(monkeypatch):
+    bridge = DeepSeekWebBridge(sticky_marker="flowflow__system_prompt_v1")
+    candidates = [
+        {
+            "probeId": "row-0",
+            "expertCandidate": {"probeId": "expert-1", "ariaChecked": "true", "label": "Expert"},
+            "fastCandidate": {"probeId": "fast-1", "ariaChecked": "false", "label": "Instant"},
+            "options": [],
+        }
+    ]
+    monkeypatch.setattr(bridge, "inspect_expert_mode_toggle_candidates", lambda page: candidates)
+
+    inspection = bridge.inspect_expert_mode(SimpleNamespace(url="https://chat.deepseek.com/"))
+
+    assert inspection["expert_mode_enabled"] is True
+    assert inspection["expert_candidate"]["probeId"] == "expert-1"
+    assert inspection["fast_candidate"]["probeId"] == "fast-1"
+    assert inspection["selected_candidate"]["probeId"] == "expert-1"
+
+
+def test_sync_expert_mode_clicks_fast_option_when_disabling(monkeypatch):
+    bridge = DeepSeekWebBridge(sticky_marker="flowflow__system_prompt_v1")
+    inspections = iter(
+        [
+            {
+                "expert_mode_enabled": True,
+                "selected_candidate": {"probeId": "expert-1", "ariaChecked": "true"},
+                "expert_candidate": {"probeId": "expert-1", "ariaChecked": "true"},
+                "fast_candidate": {"probeId": "fast-1", "ariaChecked": "false"},
+            },
+            {
+                "expert_mode_enabled": False,
+                "selected_candidate": {"probeId": "fast-1", "ariaChecked": "true"},
+                "expert_candidate": {"probeId": "expert-1", "ariaChecked": "false"},
+                "fast_candidate": {"probeId": "fast-1", "ariaChecked": "true"},
+            },
+        ]
+    )
+    monkeypatch.setattr(bridge, "inspect_expert_mode", lambda page: next(inspections))
+
+    clicked: list[str] = []
+
+    class FakeButton:
+        def click(self, timeout):  # noqa: ANN001
+            clicked.append(f"clicked:{timeout}")
+
+    class FakePage:
+        def locator(self, selector):  # noqa: ANN001
+            clicked.append(selector)
+            return SimpleNamespace(first=FakeButton())
+
+        def wait_for_timeout(self, timeout):  # noqa: ANN001
+            clicked.append(f"wait:{timeout}")
+
+    result = bridge.sync_expert_mode(FakePage(), False)
+
+    assert result["changed"] is True
+    assert '[data-deerflow-expert-candidate-id="fast-1"]' in clicked
 
 
 def test_switch_session_clears_runtime_state_and_resets_page(monkeypatch, tmp_path):

@@ -1,4 +1,5 @@
 import json
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -12,6 +13,40 @@ class FakeBridgeBase:
     sticky_reanchor_messages = None
     session_state_path = None
     reuse_persisted_chat = False
+    user_data_dir = "/tmp/fake-deepseek-profile"
+
+
+class FakePool:
+    def __init__(self, bridge):
+        self._bridge = bridge
+        self.cache_key = "fake-pool"
+        self._executor = ThreadPoolExecutor(max_workers=1)
+        self._slot = type(
+            "FakeSlot",
+            (),
+            {
+                "bridge": bridge,
+                "index": 0,
+                "executor": self._executor,
+                "pool_size": 1,
+            },
+        )()
+        self._available = type("FakeQueue", (), {"qsize": lambda self: 1})()
+
+    def first_bridge(self):
+        return self._bridge
+
+    def acquire(self):
+        return self._slot
+
+    def release(self, slot):
+        assert slot is self._slot
+
+
+def install_fake_bridge(monkeypatch, model_name: str, bridge):
+    spec = provider.get_model_spec(model_name)
+    monkeypatch.setattr(provider, "get_bridge", lambda model_name, request_user=None: (spec, bridge))
+    monkeypatch.setattr(provider, "get_bridge_pool", lambda model_name, request_user=None: (spec, FakePool(bridge)))
 
 
 def test_chat_completions_returns_openai_compatible_tool_calls(monkeypatch):
@@ -54,11 +89,7 @@ def test_chat_completions_returns_openai_compatible_tool_calls(monkeypatch):
             assert include_debug is False
             return fake_call(messages=messages, tools=tools, thinking_enabled=thinking_enabled)
 
-    monkeypatch.setattr(
-        provider,
-        "get_bridge",
-        lambda model_name, request_user=None: (provider.get_model_spec("DeepSeekV4"), FakeBridge()),
-    )
+    install_fake_bridge(monkeypatch, "DeepSeekV4", FakeBridge())
 
     client = TestClient(provider.app)
     response = client.post(
@@ -108,11 +139,7 @@ def test_chat_completions_returns_plain_text_when_no_tool_call(monkeypatch):
                 "tool_calls": [],
             }
 
-    monkeypatch.setattr(
-        provider,
-        "get_bridge",
-        lambda model_name, request_user=None: (provider.get_model_spec("DeepSeekV4"), FakeBridge()),
-    )
+    install_fake_bridge(monkeypatch, "DeepSeekV4", FakeBridge())
 
     client = TestClient(provider.app)
     response = client.post(
@@ -137,11 +164,7 @@ def test_chat_completions_promotes_bash_plaintext_to_tool_call(monkeypatch):
                 "tool_calls": [],
             }
 
-    monkeypatch.setattr(
-        provider,
-        "get_bridge",
-        lambda model_name, request_user=None: (provider.get_model_spec("DeepSeekV4"), FakeBridge()),
-    )
+    install_fake_bridge(monkeypatch, "DeepSeekV4", FakeBridge())
 
     client = TestClient(provider.app)
     response = client.post(
@@ -185,11 +208,7 @@ def test_chat_completions_promotes_bash_plaintext_with_intro_to_tool_call(monkey
                 "tool_calls": [],
             }
 
-    monkeypatch.setattr(
-        provider,
-        "get_bridge",
-        lambda model_name, request_user=None: (provider.get_model_spec("DeepSeekV4"), FakeBridge()),
-    )
+    install_fake_bridge(monkeypatch, "DeepSeekV4", FakeBridge())
 
     client = TestClient(provider.app)
     response = client.post(
@@ -230,11 +249,7 @@ def test_chat_completions_keeps_plaintext_when_no_shell_tool_provided(monkeypatc
                 "tool_calls": [],
             }
 
-    monkeypatch.setattr(
-        provider,
-        "get_bridge",
-        lambda model_name, request_user=None: (provider.get_model_spec("DeepSeekV4"), FakeBridge()),
-    )
+    install_fake_bridge(monkeypatch, "DeepSeekV4", FakeBridge())
 
     client = TestClient(provider.app)
     response = client.post(
@@ -269,11 +284,7 @@ def test_chat_completions_promotes_fenced_bash_block_to_tool_call(monkeypatch):
                 "tool_calls": [],
             }
 
-    monkeypatch.setattr(
-        provider,
-        "get_bridge",
-        lambda model_name, request_user=None: (provider.get_model_spec("DeepSeekV4"), FakeBridge()),
-    )
+    install_fake_bridge(monkeypatch, "DeepSeekV4", FakeBridge())
 
     client = TestClient(provider.app)
     response = client.post(
@@ -545,11 +556,7 @@ def test_chat_completions_accepts_cherry_undefined_fields(monkeypatch):
             captured["thinking_enabled"] = thinking_enabled
             return {"content": "hi", "tool_calls": []}
 
-    monkeypatch.setattr(
-        provider,
-        "get_bridge",
-        lambda model_name, request_user=None: (provider.get_model_spec("DeepSeekV4"), FakeBridge()),
-    )
+    install_fake_bridge(monkeypatch, "DeepSeekV4", FakeBridge())
 
     client = TestClient(provider.app)
     response = client.post(
@@ -582,11 +589,7 @@ def test_anthropic_messages_reduces_parallel_tool_calls(monkeypatch):
                 ],
             }
 
-    monkeypatch.setattr(
-        provider,
-        "get_bridge",
-        lambda model_name, request_user=None: (provider.get_model_spec("DeepSeekV4"), FakeBridge()),
-    )
+    install_fake_bridge(monkeypatch, "DeepSeekV4", FakeBridge())
 
     client = TestClient(provider.app)
     response = client.post(
@@ -627,11 +630,7 @@ def test_anthropic_messages_rewrites_non_toolu_ids(monkeypatch):
                 ],
             }
 
-    monkeypatch.setattr(
-        provider,
-        "get_bridge",
-        lambda model_name, request_user=None: (provider.get_model_spec("DeepSeekV4"), FakeBridge()),
-    )
+    install_fake_bridge(monkeypatch, "DeepSeekV4", FakeBridge())
 
     client = TestClient(provider.app)
     response = client.post(
@@ -666,11 +665,7 @@ def test_stream_response_can_include_usage(monkeypatch):
         def call(self, **_):
             return {"content": "hello", "tool_calls": []}
 
-    monkeypatch.setattr(
-        provider,
-        "get_bridge",
-        lambda model_name, request_user=None: (provider.get_model_spec("DeepSeekV4"), FakeBridge()),
-    )
+    install_fake_bridge(monkeypatch, "DeepSeekV4", FakeBridge())
 
     client = TestClient(provider.app)
     with client.stream(
@@ -721,11 +716,7 @@ def test_chat_completions_passes_thinking_enabled_from_extra_body(monkeypatch):
             captured["include_debug"] = include_debug
             return {"content": "hi", "tool_calls": []}
 
-    monkeypatch.setattr(
-        provider,
-        "get_bridge",
-        lambda model_name, request_user=None: (provider.get_model_spec("deepseek-web-deerflow"), FakeBridge()),
-    )
+    install_fake_bridge(monkeypatch, "deepseek-web-deerflow", FakeBridge())
 
     client = TestClient(provider.app)
     response = client.post(
@@ -752,11 +743,7 @@ def test_chat_completions_top_level_thinking_enabled_overrides_extra_body(monkey
             captured["thinking_enabled"] = thinking_enabled
             return {"content": "hi", "tool_calls": []}
 
-    monkeypatch.setattr(
-        provider,
-        "get_bridge",
-        lambda model_name, request_user=None: (provider.get_model_spec("deepseek-web-deerflow"), FakeBridge()),
-    )
+    install_fake_bridge(monkeypatch, "deepseek-web-deerflow", FakeBridge())
 
     client = TestClient(provider.app)
     response = client.post(
@@ -773,6 +760,37 @@ def test_chat_completions_top_level_thinking_enabled_overrides_extra_body(monkey
     assert captured["thinking_enabled"] is False
 
 
+def test_chat_completions_forces_expert_mode_for_deepseek(monkeypatch):
+    captured: dict[str, object] = {}
+
+    class FakeBridge(FakeBridgeBase):
+        def call(self, *, messages, tools, thinking_enabled=None, expert_mode_enabled=None, include_debug=False):
+            captured["messages"] = messages
+            captured["tools"] = tools
+            captured["thinking_enabled"] = thinking_enabled
+            captured["expert_mode_enabled"] = expert_mode_enabled
+            captured["include_debug"] = include_debug
+            return {"content": "hi", "tool_calls": []}
+
+    install_fake_bridge(monkeypatch, "DeepSeekV4", FakeBridge())
+
+    client = TestClient(provider.app)
+    response = client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "DeepSeekV4",
+            "messages": [{"role": "user", "content": "hi"}],
+        },
+    )
+
+    assert response.status_code == 200
+    assert captured["messages"] == [{"role": "user", "content": "hi"}]
+    assert captured["tools"] == []
+    assert captured["thinking_enabled"] is False
+    assert captured["expert_mode_enabled"] is True
+    assert captured["include_debug"] is False
+
+
 def test_debug_thinking_mode_calls_bridge(monkeypatch):
     captured: dict[str, object] = {}
 
@@ -787,11 +805,7 @@ def test_debug_thinking_mode_calls_bridge(monkeypatch):
                 "candidates": [{"label": "DeepThink"}],
             }
 
-    monkeypatch.setattr(
-        provider,
-        "get_bridge",
-        lambda model_name, request_user=None: (provider.get_model_spec("deepseek-web-deerflow"), FakeBridge()),
-    )
+    install_fake_bridge(monkeypatch, "deepseek-web-deerflow", FakeBridge())
 
     client = TestClient(provider.app)
     response = client.post(
@@ -806,3 +820,34 @@ def test_debug_thinking_mode_calls_bridge(monkeypatch):
     assert response.status_code == 200
     assert response.json()["after"]["thinking_enabled"] is True
     assert captured == {"thinking_enabled": True, "visible": True}
+
+
+def test_debug_expert_mode_calls_bridge(monkeypatch):
+    captured: dict[str, object] = {}
+
+    class FakeBridge(FakeBridgeBase):
+        def debug_sync_expert_mode(self, expert_mode_enabled, *, visible=False):
+            captured["expert_mode_enabled"] = expert_mode_enabled
+            captured["visible"] = visible
+            return {
+                "changed": True,
+                "before": {"expert_mode_enabled": False},
+                "after": {"expert_mode_enabled": True},
+                "candidates": [{"label": "专家模式"}],
+            }
+
+    install_fake_bridge(monkeypatch, "DeepSeekV4", FakeBridge())
+
+    client = TestClient(provider.app)
+    response = client.post(
+        "/debug/expert-mode",
+        json={
+            "model": "DeepSeekV4",
+            "expert_mode_enabled": True,
+            "visible": True,
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["after"]["expert_mode_enabled"] is True
+    assert captured == {"expert_mode_enabled": True, "visible": True}

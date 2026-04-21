@@ -5,11 +5,15 @@
   "description": "Electron desktop shell for deerflowwithdeepseek",
   "main": "main.cjs",
   "scripts": {
-    "dev": "electron .",
+    "dev": "pnpm run dev:static",
+    "dev:static": "pnpm run prepare:frontend && DEER_FLOW_USE_STATIC_FRONTEND=1 electron .",
     "dist:mac": "electron-builder --mac dir",
     "dist:dmg": "electron-builder --mac dmg",
-    "dist:win:thin": "electron-builder --win nsis --x64 --publish never",
-    "dist:win": "electron-builder --win nsis --x64 --publish never"
+    "prepare:frontend": "node ./scripts/build-static-frontend.mjs",
+    "prepare:win-python": "powershell -ExecutionPolicy Bypass -File ../../scripts/prepare-windows-python-runtime.ps1",
+    "dist:win:dir": "pnpm run prepare:frontend && electron-builder --win dir --x64 --publish never",
+    "dist:win:thin": "pnpm run prepare:frontend && electron-builder --win dir --x64 --publish never",
+    "dist:win": "pnpm run prepare:frontend && electron-builder --win dir --x64 --publish never"
   },
   "devDependencies": {
     "electron": "^33.2.1",
@@ -22,7 +26,9 @@
       "output": "dist"
     },
     "files": [
-      "main.cjs"
+      "main.cjs",
+      "static-server.cjs",
+      "scripts/build-static-frontend.mjs"
     ],
     "extraResources": [
       {
@@ -34,28 +40,48 @@
           "!**/.venv/**",
           "!**/.deer-flow",
           "!**/.deer-flow/**",
+          "!**/.langgraph_api",
+          "!**/.langgraph_api/**",
           "!**/__pycache__",
           "!**/__pycache__/**",
           "!**/.pytest_cache",
           "!**/.pytest_cache/**",
+          "!**/tests",
+          "!**/tests/**",
+          "!**/docs",
+          "!**/docs/**",
+          "!**/.vscode",
+          "!**/.vscode/**",
           "!**/*.pyc",
-          "!**/*.pyo"
+          "!**/*.pyo",
+          "!debug*.py",
+          "!README.md",
+          "!CLAUDE.md",
+          "!AGENTS.md",
+          "!CONTRIBUTING.md",
+          "!uv.lock"
         ]
       },
       {
-        "from": "../../frontend",
-        "to": "runtime/frontend",
+        "from": "runtime/frontend-static",
+        "to": "runtime/frontend-static",
         "filter": [
           "**/*",
-          "!**/node_modules",
-          "!**/node_modules/**",
-          "!**/.next",
-          "!**/.next/**"
+          "!demo",
+          "!demo/**"
         ]
       },
       {
-        "from": "../../scripts",
-        "to": "runtime/scripts"
+        "from": "../../skills",
+        "to": "runtime/skills"
+      },
+      {
+        "from": "runtime/python",
+        "to": "runtime/python"
+      },
+      {
+        "from": "../../config.yaml",
+        "to": "runtime/config.yaml"
       },
       {
         "from": "../../config.example.yaml",
@@ -71,13 +97,13 @@
     "win": {
       "target": [
         {
-          "target": "nsis",
+          "target": "dir",
           "arch": [
             "x64"
           ]
         }
       ],
-      "artifactName": "${productName}-${version}-setup-${arch}.${ext}"
+      "artifactName": "${productName}-${version}-${arch}.${ext}"
     },
     "nsis": {
       "oneClick": false,

@@ -19,6 +19,21 @@ export async function loadArtifactContent({
   }
   const url = urlOfArtifact({ filepath: enhancedFilepath, threadId, isMock });
   const response = await fetch(url);
+  if (!response.ok) {
+    let detail = `Failed to load artifact (${response.status})`;
+    try {
+      const payload = await response.json();
+      if (typeof payload?.detail === "string" && payload.detail.trim()) {
+        detail = payload.detail;
+      }
+    } catch {
+      const text = await response.text().catch(() => "");
+      if (text.trim()) {
+        detail = text.trim();
+      }
+    }
+    throw new Error(detail);
+  }
   const text = await response.text();
   return { content: text, url };
 }

@@ -1,6 +1,11 @@
 import type { AgentThreadContext } from "../threads";
 
+export type AppearanceColorTheme = "warm" | "stone" | "blue";
+
 export const DEFAULT_LOCAL_SETTINGS: LocalSettings = {
+  appearance: {
+    color_theme: "warm",
+  },
   notification: {
     enabled: true,
   },
@@ -22,6 +27,9 @@ function isBrowser(): boolean {
 }
 
 export interface LocalSettings {
+  appearance: {
+    color_theme: AppearanceColorTheme;
+  };
   notification: {
     enabled: boolean;
   };
@@ -43,6 +51,10 @@ export interface LocalSettings {
 function mergeLocalSettings(settings?: Partial<LocalSettings>): LocalSettings {
   return {
     ...DEFAULT_LOCAL_SETTINGS,
+    appearance: {
+      ...DEFAULT_LOCAL_SETTINGS.appearance,
+      ...settings?.appearance,
+    },
     context: {
       ...DEFAULT_LOCAL_SETTINGS.context,
       ...settings?.context,

@@ -389,6 +389,8 @@ async def start_run(
 
     if context:
         _CONTEXT_CONFIGURABLE_KEYS = {
+            "agent_name",
+            "is_bootstrap",
             "model_name",
             "mode",
             "context_compression_enabled",

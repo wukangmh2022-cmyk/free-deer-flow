@@ -1,12 +1,15 @@
 import json
 import logging
-from pathlib import Path
 from typing import Literal
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
-from deerflow.config.extensions_config import ExtensionsConfig, get_extensions_config, reload_extensions_config
+from deerflow.config.extensions_config import (
+    ensure_extensions_config_path,
+    get_extensions_config,
+    reload_extensions_config,
+)
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api", tags=["mcp"])
@@ -135,12 +138,8 @@ async def update_mcp_configuration(request: McpConfigUpdateRequest) -> McpConfig
     """
     try:
         # Get the current config path (or determine where to save it)
-        config_path = ExtensionsConfig.resolve_config_path()
-
-        # If no config file exists, create one in the parent directory (project root)
-        if config_path is None:
-            config_path = Path.cwd().parent / "extensions_config.json"
-            logger.info(f"No existing extensions config found. Creating new config at: {config_path}")
+        config_path = ensure_extensions_config_path()
+        logger.info(f"Using extensions config path: {config_path}")
 
         # Load current config to preserve skills configuration
         current_config = get_extensions_config()

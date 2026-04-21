@@ -73,6 +73,22 @@ THINKING_TOGGLE_TOKENS: tuple[tuple[str, int], ...] = (
     ("r1", 80),
     ("think", 60),
 )
+EXPERT_MODE_TOGGLE_TOKENS: tuple[tuple[str, int], ...] = (
+    ("专家模式", 320),
+    ("专家", 260),
+    ("expert mode", 320),
+    ("expert", 260),
+)
+FAST_MODE_TOGGLE_TOKENS: tuple[tuple[str, int], ...] = (
+    ("快速模式", 320),
+    ("快速", 260),
+    ("instant mode", 320),
+    ("instant", 260),
+    ("fast mode", 300),
+    ("fast", 220),
+    ("default mode", 220),
+    ("default", 140),
+)
 DEFAULT_NEW_CHAT_SELECTORS = (
     'a[href="/new"]',
     'button:has-text("New Chat")',
@@ -129,6 +145,25 @@ TOOL_NAME_ALIASES = {
 CHAT_URL_RE = re.compile(r"^https://chat\.deepseek\.com/a/chat/s/[A-Za-z0-9-]+/?$")
 DEFAULT_COPY_PROBE_MAX_MS = int(os.environ.get("DEEPSEEK_WEB_COPY_PROBE_MAX_MS", "500"))
 DEFAULT_COPY_CANDIDATE_MAX_DISTANCE = int(os.environ.get("DEEPSEEK_WEB_COPY_CANDIDATE_MAX_DISTANCE", "900"))
+COPY_TOOLTIP_WAIT_MS = int(os.environ.get("DEEPSEEK_WEB_COPY_TOOLTIP_WAIT_MS", "140"))
+COPY_FALLBACK_CLICK_DISTANCE = int(os.environ.get("DEEPSEEK_WEB_COPY_FALLBACK_CLICK_DISTANCE", "80"))
+LOG_TIMING = os.environ.get("DEEPSEEK_WEB_LOG_TIMING", "1").strip().lower() not in {
+    "0",
+    "false",
+    "off",
+    "no",
+    "",
+}
+
+STRICT_JSON_FORMAT_PROMPT = (
+    "【非常重要，必须严格遵守输出协议】\n"
+    "你现在不是在普通聊天。你的输出会被机器直接解析。\n"
+    "每一轮最终回复只能是一个 JSON 对象，禁止 Markdown、代码块、XML、<tool_call>、解释文字、前后缀。\n"
+    '唯一允许的顶层结构是：{"content":"string","tool_calls":[{"name":"string","arguments":{},"id":"string"}]}\n'
+    "需要调用工具时，必须把工具调用放进 tool_calls 数组，arguments 必须是 JSON 对象；content 可以为空字符串。\n"
+    "不需要调用工具时，tool_calls 必须是空数组 []。\n"
+    "如果你输出了自然语言说明、XML 标签或代码块，系统会判定本轮失败并要求重试。\n"
+)
 
 
 @dataclass
@@ -145,7 +180,7 @@ class DeepSeekTrace:
 
     def as_dict(self) -> dict[str, Any]:
         points = {"start": self.started_at, **self.marks}
-        ordered = list(points.items())
+        ordered = sorted(points.items(), key=lambda item: item[1])
         steps: dict[str, int] = {}
         previous_name, previous_time = ordered[0]
         for name, timestamp in ordered[1:]:
@@ -685,6 +720,8 @@ def payload_candidate_score(candidate: dict[str, Any]) -> tuple[int, int, int]:
         return (-8_000, -1, len(stripped))
     if is_empty_assistant_payload_text(stripped):
         return (-7_000, -1, len(stripped))
+    if is_low_signal_assistant_payload_text(stripped):
+        return (-6_000, -1, len(stripped))
 
     dom_index = candidate.get("domIndex")
     try:
@@ -717,6 +754,8 @@ def choose_best_payload_candidate(candidates: list[dict[str, Any]]) -> dict[str,
         if is_schema_example_payload_text(stripped):
             continue
         if is_empty_assistant_payload_text(stripped):
+            continue
+        if is_low_signal_assistant_payload_text(stripped):
             continue
         dom_index = candidate.get("domIndex")
         probe_id = candidate.get("probeId")
@@ -825,7 +864,53 @@ def is_empty_assistant_payload_text(text: str) -> bool:
     except Exception:
         payload = None
 
-    return isinstance(payload, dict) and not payload
+    if not isinstance(payload, dict):
+        return False
+    if not payload:
+        return True
+    content = payload.get("content")
+    tool_calls = payload.get("tool_calls")
+    return isinstance(content, str) and not content.strip() and isinstance(tool_calls, list) and not tool_calls
+
+
+def is_low_signal_assistant_payload_text(text: str) -> bool:
+    stripped = text.strip()
+    if not stripped or not stripped.startswith("{"):
+        return False
+
+    try:
+        payload = extract_json_object(stripped)
+    except Exception:
+        return False
+
+    if not isinstance(payload, dict):
+        return False
+    content = payload.get("content")
+    tool_calls = payload.get("tool_calls")
+    if not isinstance(content, str) or not isinstance(tool_calls, list) or tool_calls:
+        return False
+
+    compact = " ".join(content.split()).strip().lower()
+    low_signal_markers = (
+        "openai工具调用协议验证",
+        "openai 工具调用协议验证",
+        "工具调用协议验证",
+        "tool calling protocol",
+        "protocol validation",
+    )
+    return any(marker in compact for marker in low_signal_markers)
+
+
+def is_suppressed_assistant_payload_text(text: str) -> bool:
+    stripped = text.strip()
+    if not stripped:
+        return False
+    return (
+        is_prompt_replay_text(stripped)
+        or is_placeholder_assistant_payload_text(stripped)
+        or is_empty_assistant_payload_text(stripped)
+        or is_low_signal_assistant_payload_text(stripped)
+    )
 
 
 def is_suspicious_short_fragment(text: str) -> bool:
@@ -841,6 +926,23 @@ def is_suspicious_short_fragment(text: str) -> bool:
     if any(ch in stripped for ch in "{}[]\":,`"):
         return False
     return True
+
+
+def is_transient_thinking_text(text: str) -> bool:
+    stripped = text.strip()
+    if not stripped:
+        return False
+    if looks_like_assistant_payload_candidate(stripped) or is_assistant_payload_text(stripped):
+        return False
+    head = stripped[:160].lower()
+    if head.startswith(("thinking…", "thinking...", "thinking", "思考中", "正在思考")):
+        return True
+    try:
+        extract_json_object(stripped)
+        return False
+    except Exception:
+        pass
+    return False
 
 
 def _append_transport_payload_candidates(candidates: list[str], value: Any) -> None:
@@ -1200,8 +1302,9 @@ def extract_json_object(text: str) -> dict[str, Any]:
 
 
 class DeepSeekTransportCapture:
-    def __init__(self, page: Page) -> None:
+    def __init__(self, page: Page, *, ignore_text: Any = None) -> None:
         self.page = page
+        self._ignore_text = ignore_text
         self._installed = False
         self._candidates: list[TransportTextCandidate] = []
         self._cdp_session: Any = None
@@ -1270,8 +1373,16 @@ class DeepSeekTransportCapture:
         payload_candidates = [candidate.text for candidate in self._candidates]
         return choose_best_payload_text(payload_candidates)
 
+    def clear(self) -> None:
+        self._candidates.clear()
+
     def _record_text(self, *, source: str, url: str, text: str) -> None:
         for candidate_text in extract_transport_payload_candidates(text):
+            try:
+                if self._ignore_text is not None and self._ignore_text(candidate_text):
+                    continue
+            except Exception:
+                pass
             self._candidates.append(
                 TransportTextCandidate(
                     source=source,
@@ -1356,6 +1467,9 @@ class DeepSeekWebBridge:
         send_selectors: tuple[str, ...] = DEFAULT_SEND_SELECTORS,
         new_chat_selectors: tuple[str, ...] = DEFAULT_NEW_CHAT_SELECTORS,
         assistant_selectors: tuple[str, ...] = DEFAULT_ASSISTANT_SELECTORS,
+        preferred_model_label: str | None = None,
+        model_menu_selectors: tuple[str, ...] = (),
+        model_option_selectors: tuple[str, ...] = (),
         force_new_chat: bool = True,
         sticky_marker: str | None = None,
         sticky_scan_chars: int = 8000,
@@ -1363,6 +1477,8 @@ class DeepSeekWebBridge:
         session_state_path: str | None = None,
         reuse_persisted_chat: bool = False,
         copy_probe_max_ms: int = DEFAULT_COPY_PROBE_MAX_MS,
+        copy_candidate_max_distance: int = DEFAULT_COPY_CANDIDATE_MAX_DISTANCE,
+        fast_new_chat: bool = False,
     ) -> None:
         self.url = url
         self.user_data_dir = user_data_dir
@@ -1375,6 +1491,9 @@ class DeepSeekWebBridge:
         self.send_selectors = send_selectors
         self.new_chat_selectors = new_chat_selectors
         self.assistant_selectors = assistant_selectors
+        self.preferred_model_label = preferred_model_label
+        self.model_menu_selectors = model_menu_selectors
+        self.model_option_selectors = model_option_selectors
         self.force_new_chat = force_new_chat
         self.sticky_marker = sticky_marker
         self.sticky_scan_chars = sticky_scan_chars
@@ -1382,7 +1501,8 @@ class DeepSeekWebBridge:
         self.session_state_path = session_state_path
         self.reuse_persisted_chat = reuse_persisted_chat
         self.copy_probe_max_ms = max(0, int(copy_probe_max_ms))
-        self.copy_candidate_max_distance = max(0, int(DEFAULT_COPY_CANDIDATE_MAX_DISTANCE))
+        self.copy_candidate_max_distance = max(0, int(copy_candidate_max_distance))
+        self.fast_new_chat = fast_new_chat
 
         self._playwright = None
         self._browser_type = None
@@ -1397,6 +1517,8 @@ class DeepSeekWebBridge:
         self._active_session_state_path: str | None = None
         self._active_sticky_marker: str | None = None
         self._thinking_enabled: bool | None = None
+        self._expert_mode_enabled: bool | None = None
+        self._active_request_prompt = ""
         self._lock = threading.RLock()
 
     def close(self) -> None:
@@ -1421,6 +1543,7 @@ class DeepSeekWebBridge:
         self._persisted_chat_url = None
         self._state_loaded = False
         self._thinking_enabled = None
+        self._expert_mode_enabled = None
 
     def _resolved_session_state_path(self) -> str | None:
         if not self.session_state_path:
@@ -1565,6 +1688,19 @@ class DeepSeekWebBridge:
         finally:
             self._page = None
 
+    def _is_active_request_echo_text(self, text: str) -> bool:
+        stripped = (text or "").strip()
+        prompt = self._active_request_prompt
+        if len(stripped) < 8 or not prompt:
+            return False
+        if stripped in prompt:
+            return True
+        try:
+            encoded = json.dumps(stripped, ensure_ascii=False)
+        except Exception:
+            return False
+        return encoded in prompt or encoded.strip('\"') in prompt
+
     def open_login_page(self) -> dict[str, Any]:
         """Open a persistent DeepSeek page so the user can log in manually."""
         with self._lock:
@@ -1582,6 +1718,7 @@ class DeepSeekWebBridge:
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
         thinking_enabled: bool | None = None,
+        expert_mode_enabled: bool | None = None,
         include_debug: bool = False,
         output_protocol: str = "openai",
     ) -> dict[str, Any]:
@@ -1590,6 +1727,7 @@ class DeepSeekWebBridge:
             messages=messages,
             tools=tools or [],
             thinking_enabled=thinking_enabled,
+            expert_mode_enabled=expert_mode_enabled,
             output_protocol=output_protocol,
             trace=trace,
         )
@@ -1601,7 +1739,10 @@ class DeepSeekWebBridge:
         trace.set("mark_count", len(trace.marks))
         trace.set("mark_names", list(trace.marks.keys()))
         timing = trace.as_dict()
-        logger.info("DeepSeek web bridge timing: %s", timing)
+        if LOG_TIMING:
+            logger.warning("DeepSeek web bridge timing: %s", timing)
+        else:
+            logger.info("DeepSeek web bridge timing: %s", timing)
         if include_debug:
             payload["debug"] = {"timing": timing}
         return payload
@@ -1641,12 +1782,121 @@ class DeepSeekWebBridge:
             trace.set("page_reused", False)
             trace.mark("page_ready")
 
-    def inspect_thinking_toggle_candidates(self, page: Page, *, limit: int = 12) -> list[dict[str, Any]]:
+    def select_preferred_model(self, page: Page, *, trace: DeepSeekTrace | None = None) -> dict[str, Any]:
+        label = (self.preferred_model_label or "").strip()
+        if not label:
+            return {"changed": False, "requested": None}
+        if not self.model_menu_selectors:
+            return {
+                "changed": False,
+                "requested": label,
+                "error": "Model menu selectors are not configured.",
+            }
+
+        trigger: Locator | None = None
+        trigger_selector: str | None = None
+        trigger_text = ""
+        for selector in self.model_menu_selectors:
+            locator = page.locator(selector).last
+            try:
+                locator.wait_for(state="visible", timeout=1000)
+                trigger = locator
+                trigger_selector = selector
+                try:
+                    trigger_text = locator.inner_text(timeout=500)
+                except PlaywrightError:
+                    trigger_text = ""
+                break
+            except PlaywrightError:
+                continue
+            except PlaywrightTimeoutError:
+                continue
+
+        if trigger is None:
+            result = {
+                "changed": False,
+                "requested": label,
+                "error": "Model menu not found.",
+            }
+            if trace is not None:
+                trace.set("model_select_error", result["error"])
+            return result
+
+        if label in trigger_text:
+            result = {
+                "changed": False,
+                "requested": label,
+                "current": trigger_text,
+                "trigger_selector": trigger_selector,
+            }
+            if trace is not None:
+                trace.set("model_select_changed", False)
+                trace.set("model_select_current", trigger_text)
+            return result
+
+        try:
+            trigger.click(timeout=1500)
+            page.wait_for_timeout(300)
+        except Exception as exc:
+            result = {
+                "changed": False,
+                "requested": label,
+                "current": trigger_text,
+                "trigger_selector": trigger_selector,
+                "error": f"Failed to open model menu: {exc}",
+            }
+            if trace is not None:
+                trace.set("model_select_error", result["error"])
+            return result
+
+        option_selectors = self.model_option_selectors or (f'text="{label}"',)
+        last_error: str | None = None
+        for selector in option_selectors:
+            option = page.locator(selector).last
+            try:
+                option.wait_for(state="visible", timeout=1500)
+                option.click(timeout=1500)
+                page.wait_for_timeout(700)
+                result = {
+                    "changed": True,
+                    "requested": label,
+                    "previous": trigger_text,
+                    "trigger_selector": trigger_selector,
+                    "option_selector": selector,
+                }
+                if trace is not None:
+                    trace.set("model_select_changed", True)
+                    trace.set("model_select_requested", label)
+                    trace.set("model_select_option_selector", selector)
+                return result
+            except Exception as exc:
+                last_error = f"{selector}: {exc}"
+                continue
+
+        result = {
+            "changed": False,
+            "requested": label,
+            "current": trigger_text,
+            "trigger_selector": trigger_selector,
+            "error": f"Model option not found. Last error: {last_error}",
+        }
+        if trace is not None:
+            trace.set("model_select_error", result["error"])
+        return result
+
+    def _inspect_toggle_candidates(
+        self,
+        page: Page,
+        *,
+        candidate_attr: str,
+        token_weights: tuple[tuple[str, int], ...],
+        limit: int = 12,
+    ) -> list[dict[str, Any]]:
         try:
             result = page.evaluate(
-                """({ selectors, limit, tokenWeights }) => {
-                    for (const node of document.querySelectorAll('[data-deerflow-thinking-candidate-id]')) {
-                        node.removeAttribute('data-deerflow-thinking-candidate-id');
+                """({ selectors, limit, tokenWeights, candidateAttr }) => {
+                    for (const node of document.querySelectorAll(`[${candidateAttr}]`)) {
+                        node.removeAttribute(candidateAttr);
                     }
 
                     const isVisible = (node) => {
@@ -1701,7 +1951,7 @@ class DeepSeekWebBridge:
                         const distance = inputRect
                             ? Math.abs(rect.left - inputRect.left) + Math.abs(rect.top - inputRect.top)
                             : 999999;
-                        node.dataset.deerflowThinkingCandidateId = String(candidateId);
+                        node.setAttribute(candidateAttr, String(candidateId));
                         candidates.push({
                             probeId: String(candidateId),
                             label,
@@ -1734,11 +1984,12 @@ class DeepSeekWebBridge:
                 {
                     "selectors": list(self.input_selectors),
                     "limit": limit,
-                    "tokenWeights": list(THINKING_TOGGLE_TOKENS),
+                    "tokenWeights": list(token_weights),
+                    "candidateAttr": candidate_attr,
                 },
             )
         except Exception:
-            logger.debug("Failed to inspect DeepSeek thinking toggle candidates.", exc_info=True)
+            logger.debug("Failed to inspect DeepSeek toggle candidates.", exc_info=True)
             return []
 
         if not isinstance(result, dict):
@@ -1746,7 +1997,212 @@ class DeepSeekWebBridge:
         candidates = result.get("candidates")
         return candidates if isinstance(candidates, list) else []
 
-    def _thinking_candidate_state(self, candidate: dict[str, Any] | None) -> bool | None:
+    def inspect_thinking_toggle_candidates(self, page: Page, *, limit: int = 12) -> list[dict[str, Any]]:
+        return self._inspect_toggle_candidates(
+            page,
+            candidate_attr="data-deerflow-thinking-candidate-id",
+            token_weights=THINKING_TOGGLE_TOKENS,
+            limit=limit,
+        )
+
+    def inspect_expert_mode_toggle_candidates(self, page: Page, *, limit: int = 12) -> list[dict[str, Any]]:
+        try:
+            result = page.evaluate(
+                """({ selectors, limit, candidateAttr, expertTokens, fastTokens }) => {
+                    for (const node of document.querySelectorAll(`[${candidateAttr}]`)) {
+                        node.removeAttribute(candidateAttr);
+                    }
+
+                    const isVisible = (node) => {
+                        if (!(node instanceof HTMLElement)) {
+                            return false;
+                        }
+                        const style = window.getComputedStyle(node);
+                        if (style.visibility === 'hidden' || style.display === 'none' || style.opacity === '0') {
+                            return false;
+                        }
+                        const rect = node.getBoundingClientRect();
+                        return !!rect.width && !!rect.height;
+                    };
+
+                    const normalize = (value) => (value || '').toLowerCase();
+                    const labelFor = (node) => [
+                        node.getAttribute('aria-label') || '',
+                        node.getAttribute('title') || '',
+                        node.innerText || '',
+                        node.textContent || '',
+                    ].join(' ').replace(/\\s+/g, ' ').trim();
+
+                    const matchesToken = (value, tokens) => {
+                        const normalized = normalize(value);
+                        return tokens.some((token) => normalized.includes(token));
+                    };
+
+                    const optionKind = (node) => {
+                        const modelType = normalize(node.getAttribute('data-model-type'));
+                        if (modelType === 'expert') {
+                            return 'expert';
+                        }
+                        if (['default', 'instant', 'fast'].includes(modelType)) {
+                            return 'fast';
+                        }
+
+                        const combined = `${labelFor(node)} ${typeof node.className === 'string' ? node.className : ''}`;
+                        if (matchesToken(combined, expertTokens)) {
+                            return 'expert';
+                        }
+                        if (matchesToken(combined, fastTokens)) {
+                            return 'fast';
+                        }
+                        return null;
+                    };
+
+                    const buildOption = (node, kind, probeId) => ({
+                        probeId,
+                        kind,
+                        label: labelFor(node),
+                        className: typeof node.className === 'string' ? node.className : '',
+                        ariaPressed: node.getAttribute('aria-pressed'),
+                        ariaChecked: node.getAttribute('aria-checked'),
+                        dataState: node.getAttribute('data-state'),
+                        dataModelType: node.getAttribute('data-model-type'),
+                        disabled: node.getAttribute('aria-disabled') || (node.hasAttribute('disabled') ? 'true' : null),
+                        backgroundColor: window.getComputedStyle(node).backgroundColor,
+                        borderColor: window.getComputedStyle(node).borderColor,
+                        html: node.outerHTML.slice(0, 320),
+                    });
+
+                    let input = null;
+                    for (const selector of selectors) {
+                        const nodes = [...document.querySelectorAll(selector)].filter(isVisible);
+                        if (nodes.length > 0) {
+                            input = nodes[nodes.length - 1];
+                            break;
+                        }
+                    }
+                    const inputRect = input instanceof HTMLElement ? input.getBoundingClientRect() : null;
+
+                    const rows = [];
+                    let nextProbeId = 0;
+                    for (const group of document.querySelectorAll('[role="radiogroup"]')) {
+                        if (!(group instanceof HTMLElement) || !isVisible(group)) {
+                            continue;
+                        }
+
+                        const options = [];
+                        for (const node of group.querySelectorAll('[role="radio"],button,[role="button"],div[role="button"]')) {
+                            if (!(node instanceof HTMLElement) || !isVisible(node)) {
+                                continue;
+                            }
+                            const kind = optionKind(node);
+                            if (!kind) {
+                                continue;
+                            }
+                            const probeId = String(nextProbeId);
+                            nextProbeId += 1;
+                            node.setAttribute(candidateAttr, probeId);
+                            options.push(buildOption(node, kind, probeId));
+                        }
+
+                        const expertCandidate = options.find((item) => item.kind === 'expert') || null;
+                        const fastCandidate = options.find((item) => item.kind === 'fast') || null;
+                        if (!expertCandidate || !fastCandidate) {
+                            continue;
+                        }
+
+                        const rect = group.getBoundingClientRect();
+                        const distance = inputRect
+                            ? Math.abs(rect.left - inputRect.left) + Math.abs(rect.top - inputRect.top)
+                            : 999999;
+                        rows.push({
+                            probeId: `row-${rows.length}`,
+                            label: labelFor(group),
+                            className: typeof group.className === 'string' ? group.className : '',
+                            distance,
+                            html: group.outerHTML.slice(0, 320),
+                            expertCandidate,
+                            fastCandidate,
+                            options,
+                        });
+                    }
+
+                    if (rows.length === 0) {
+                        const containers = new Map();
+                        for (const node of document.querySelectorAll('[data-model-type],[role="radio"],button,[role="button"],div[role="button"]')) {
+                            if (!(node instanceof HTMLElement) || !isVisible(node)) {
+                                continue;
+                            }
+                            const kind = optionKind(node);
+                            if (!kind) {
+                                continue;
+                            }
+                            const container = node.parentElement;
+                            if (!(container instanceof HTMLElement) || !isVisible(container)) {
+                                continue;
+                            }
+                            const rect = container.getBoundingClientRect();
+                            const key = `${container.tagName}:${Math.round(rect.left)}:${Math.round(rect.top)}:${Math.round(rect.width)}:${Math.round(rect.height)}`;
+                            let row = containers.get(key);
+                            if (!row) {
+                                const distance = inputRect
+                                    ? Math.abs(rect.left - inputRect.left) + Math.abs(rect.top - inputRect.top)
+                                    : 999999;
+                                row = {
+                                    probeId: `row-fallback-${containers.size}`,
+                                    label: labelFor(container),
+                                    className: typeof container.className === 'string' ? container.className : '',
+                                    distance,
+                                    html: container.outerHTML.slice(0, 320),
+                                    options: [],
+                                };
+                                containers.set(key, row);
+                            }
+                            const probeId = String(nextProbeId);
+                            nextProbeId += 1;
+                            node.setAttribute(candidateAttr, probeId);
+                            row.options.push(buildOption(node, kind, probeId));
+                        }
+
+                        for (const row of containers.values()) {
+                            row.expertCandidate = row.options.find((item) => item.kind === 'expert') || null;
+                            row.fastCandidate = row.options.find((item) => item.kind === 'fast') || null;
+                            if (row.expertCandidate && row.fastCandidate) {
+                                rows.push(row);
+                            }
+                        }
+                    }
+
+                    rows.sort((a, b) => {
+                        if (a.distance !== b.distance) {
+                            return a.distance - b.distance;
+                        }
+                        return (b.label || '').length - (a.label || '').length;
+                    });
+
+                    return {
+                        inputFound: !!input,
+                        url: location.href,
+                        candidates: rows.slice(0, limit),
+                    };
+                }""",
+                {
+                    "selectors": list(self.input_selectors),
+                    "limit": limit,
+                    "candidateAttr": "data-deerflow-expert-candidate-id",
+                    "expertTokens": [token.lower() for token, _ in EXPERT_MODE_TOGGLE_TOKENS],
+                    "fastTokens": [token.lower() for token, _ in FAST_MODE_TOGGLE_TOKENS],
+                },
+            )
+        except Exception:
+            logger.debug("Failed to inspect DeepSeek expert mode candidates.", exc_info=True)
+            return []
+
+        if not isinstance(result, dict):
+            return []
+        candidates = result.get("candidates")
+        return candidates if isinstance(candidates, list) else []
+
+    def _toggle_candidate_state(self, candidate: dict[str, Any] | None) -> bool | None:
         if not isinstance(candidate, dict):
             return None
 
@@ -1778,6 +2234,51 @@ class DeepSeekWebBridge:
             return False
         return None
 
+    def _thinking_candidate_state(self, candidate: dict[str, Any] | None) -> bool | None:
+        return self._toggle_candidate_state(candidate)
+
+    def _expert_mode_candidate_state(self, candidate: dict[str, Any] | None) -> bool | None:
+        return self._toggle_candidate_state(candidate)
+
+    def _resolve_expert_mode_state(
+        self,
+        *,
+        expert_candidate: dict[str, Any] | None,
+        fast_candidate: dict[str, Any] | None,
+    ) -> bool | None:
+        expert_state = self._expert_mode_candidate_state(expert_candidate)
+        if isinstance(expert_state, bool):
+            return expert_state
+
+        fast_state = self._expert_mode_candidate_state(fast_candidate)
+        if isinstance(fast_state, bool):
+            return not fast_state
+        return None
+
+    def _resolve_expert_mode_selected_candidate(
+        self,
+        *,
+        expert_candidate: dict[str, Any] | None,
+        fast_candidate: dict[str, Any] | None,
+    ) -> dict[str, Any] | None:
+        expert_state = self._expert_mode_candidate_state(expert_candidate)
+        if expert_state is True:
+            return expert_candidate
+        if expert_state is False and isinstance(fast_candidate, dict):
+            return fast_candidate
+
+        fast_state = self._expert_mode_candidate_state(fast_candidate)
+        if fast_state is True:
+            return fast_candidate
+        if fast_state is False and isinstance(expert_candidate, dict):
+            return expert_candidate
+
+        if isinstance(expert_candidate, dict):
+            return expert_candidate
+        if isinstance(fast_candidate, dict):
+            return fast_candidate
+        return None
+
     def inspect_thinking_mode(self, page: Page) -> dict[str, Any]:
         candidates = self.inspect_thinking_toggle_candidates(page)
         selected_candidate = candidates[0] if candidates else None
@@ -1789,6 +2290,31 @@ class DeepSeekWebBridge:
             "thinking_enabled": current,
             "candidate_count": len(candidates),
             "selected_candidate": selected_candidate,
+            "candidates": candidates,
+        }
+
+    def inspect_expert_mode(self, page: Page) -> dict[str, Any]:
+        candidates = self.inspect_expert_mode_toggle_candidates(page)
+        top_row = candidates[0] if candidates else {}
+        expert_candidate = top_row.get("expertCandidate") if isinstance(top_row, dict) else None
+        fast_candidate = top_row.get("fastCandidate") if isinstance(top_row, dict) else None
+        selected_candidate = self._resolve_expert_mode_selected_candidate(
+            expert_candidate=expert_candidate,
+            fast_candidate=fast_candidate,
+        )
+        current = self._resolve_expert_mode_state(
+            expert_candidate=expert_candidate,
+            fast_candidate=fast_candidate,
+        )
+        if current is None and self._expert_mode_enabled is not None:
+            current = self._expert_mode_enabled
+        return {
+            "url": page.url,
+            "expert_mode_enabled": current,
+            "candidate_count": len(candidates),
+            "selected_candidate": selected_candidate,
+            "expert_candidate": expert_candidate,
+            "fast_candidate": fast_candidate,
             "candidates": candidates,
         }
 
@@ -1883,8 +2409,103 @@ class DeepSeekWebBridge:
 
         return self.sync_thinking_mode(page, desired)
 
+    def sync_expert_mode(
+        self,
+        page: Page,
+        desired: bool | None,
+        *,
+        trace: DeepSeekTrace | None = None,
+    ) -> dict[str, Any]:
+        before = self.inspect_expert_mode(page)
+        if desired is None:
+            if isinstance(before.get("expert_mode_enabled"), bool):
+                self._expert_mode_enabled = before["expert_mode_enabled"]
+            return {
+                "changed": False,
+                "requested": desired,
+                "before": before,
+                "after": before,
+            }
+
+        if trace is not None:
+            trace.set("expert_mode_requested", desired)
+            trace.set("expert_mode_before", before.get("expert_mode_enabled"))
+
+        if before.get("expert_mode_enabled") is desired:
+            self._expert_mode_enabled = desired
+            if trace is not None:
+                trace.set("expert_mode_changed", False)
+            return {
+                "changed": False,
+                "requested": desired,
+                "before": before,
+                "after": before,
+            }
+
+        target_candidate = before.get("expert_candidate") if desired else before.get("fast_candidate")
+        if not isinstance(target_candidate, dict):
+            target_candidate = before.get("selected_candidate") or {}
+
+        probe_id = target_candidate.get("probeId")
+        if not isinstance(probe_id, str):
+            return {
+                "changed": False,
+                "requested": desired,
+                "before": before,
+                "after": before,
+                "error": "Expert mode option not found.",
+            }
+
+        try:
+            button = page.locator(f'[data-deerflow-expert-candidate-id="{probe_id}"]').first
+            button.click(timeout=1500)
+            page.wait_for_timeout(500)
+        except Exception as exc:
+            return {
+                "changed": False,
+                "requested": desired,
+                "before": before,
+                "after": self.inspect_expert_mode(page),
+                "error": f"Failed to click expert mode option: {exc}",
+            }
+
+        after = self.inspect_expert_mode(page)
+        current = after.get("expert_mode_enabled")
+        changed = before.get("expert_mode_enabled") != current
+        if current is desired:
+            self._expert_mode_enabled = desired
+        if trace is not None:
+            trace.set("expert_mode_after", current)
+            trace.set("expert_mode_changed", changed)
+        return {
+            "changed": changed,
+            "requested": desired,
+            "before": before,
+            "after": after,
+        }
+
+    def debug_sync_expert_mode(self, desired: bool | None, *, visible: bool = False) -> dict[str, Any]:
+        page = self.ensure_page(visible=visible)
+        ready_error: str | None = None
+        try:
+            self.ensure_chat_ready(page)
+        except Exception as exc:
+            ready_error = str(exc)
+
+        if ready_error is not None:
+            inspection = self.inspect_expert_mode(page)
+            inspection["error"] = ready_error
+            inspection["requested"] = desired
+            inspection["changed"] = False
+            inspection["before"] = inspection
+            inspection["after"] = inspection
+            return inspection
+
+        return self.sync_expert_mode(page, desired)
+
     def build_full_prompt(self, *, messages: list[dict[str, Any]], tools: list[dict[str, Any]], output_protocol: str = "openai") -> str:
         parts = [
+            STRICT_JSON_FORMAT_PROMPT,
             "You are acting as the backend LLM for a local OpenAI-compatible chat gateway.",
             "Continue this conversation naturally and follow the system/user/tool messages.",
         ]
@@ -1926,6 +2547,7 @@ class DeepSeekWebBridge:
         output_protocol: str = "openai",
     ) -> str:
         parts = [
+            STRICT_JSON_FORMAT_PROMPT,
             "Continue the existing DeerFlow session already initialized in this chat.",
             "- Follow the previously established DeerFlow system instructions already present in this conversation.",
         ]
@@ -2151,6 +2773,7 @@ class DeepSeekWebBridge:
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]],
         thinking_enabled: bool | None = None,
+        expert_mode_enabled: bool | None = None,
         output_protocol: str = "openai",
         trace: DeepSeekTrace | None = None,
     ) -> str:
@@ -2158,21 +2781,50 @@ class DeepSeekWebBridge:
             trace.mark("context_ready")
         with self._lock:
             self._switch_session_if_needed()
-            if self.force_new_chat:
+            reused_page_for_new_chat = (
+                self.force_new_chat
+                and self.fast_new_chat
+                and self._page is not None
+                and not self._page.is_closed()
+            )
+            if self.force_new_chat and not reused_page_for_new_chat:
                 self.reset_page()
                 self._clear_session_runtime_state()
             page = self.ensure_page()
             if trace is not None:
                 trace.mark("page_created")
             try:
+                if reused_page_for_new_chat:
+                    try:
+                        page.goto(self.url, wait_until="domcontentloaded", timeout=self.page_load_timeout_ms)
+                        self._clear_session_runtime_state()
+                        self._refresh_current_chat_url(page, persist=False)
+                        if trace is not None:
+                            trace.set("new_chat_selector", "fast_goto")
+                            trace.mark("new_chat_ready")
+                    except Exception:
+                        logger.debug("Fast page-level new-chat reset failed; recreating page.", exc_info=True)
+                        self.reset_page()
+                        self._clear_session_runtime_state()
+                        page = self.ensure_page()
+                        reused_page_for_new_chat = False
+                        if trace is not None:
+                            trace.mark("page_recreated_after_fast_new_chat_miss")
                 self.ensure_chat_ready(page, trace=trace)
+                model_select_result = self.select_preferred_model(page, trace=trace)
+                if trace is not None:
+                    trace.set("model_select_error", model_select_result.get("error"))
                 thinking_result = self.sync_thinking_mode(page, thinking_enabled, trace=trace)
                 if trace is not None:
                     trace.set("thinking_sync_error", thinking_result.get("error"))
+                expert_mode_result = self.sync_expert_mode(page, expert_mode_enabled, trace=trace)
+                if trace is not None:
+                    trace.set("expert_mode_sync_error", expert_mode_result.get("error"))
                 if self.force_new_chat:
                     if trace is not None:
-                        trace.set("new_chat_selector", "fresh_page")
-                        trace.mark("new_chat_ready")
+                        if not reused_page_for_new_chat:
+                            trace.set("new_chat_selector", "fresh_page")
+                            trace.mark("new_chat_ready")
                 elif self.sticky_marker and not self._sticky_initialized:
                     self._sticky_initialized = self.detect_sticky_marker(page)
                     if trace is not None:
@@ -2220,16 +2872,23 @@ class DeepSeekWebBridge:
                     input_box = self.first_visible(page, self.input_selectors)
                 if trace is not None:
                     trace.mark("input_ready")
+                logger.warning("DeepSeek submit_prompt input ready prompt_chars=%d", len(prompt))
                 assistant_locator = self.assistant_locator(page)
-                before_count = assistant_locator.count()
                 if self.force_new_chat:
-                    before_last_text = self.last_assistant_text(assistant_locator, page)
+                    before_count = 0
+                    before_last_text = ""
                     before_last_index = -1
                 else:
+                    before_count = assistant_locator.count()
                     before_snapshot = self.assistant_snapshot(assistant_locator, page)
                     before_last_text = before_snapshot["text"]
                     before_last_index = before_snapshot["index"]
-                transport_capture = DeepSeekTransportCapture(page)
+                previous_active_request_prompt = self._active_request_prompt
+                self._active_request_prompt = prompt
+                transport_capture = DeepSeekTransportCapture(
+                    page,
+                    ignore_text=self._is_active_request_echo_text,
+                )
                 transport_capture.install()
                 if trace is not None:
                     trace.set("assistant_count_before", before_count)
@@ -2239,6 +2898,7 @@ class DeepSeekWebBridge:
                     self.fill_input(input_box, prompt)
                     if trace is not None:
                         trace.mark("prompt_filled")
+                    logger.warning("DeepSeek submit_prompt prompt filled prompt_chars=%d", len(prompt))
                     if not self.try_submit(page, input_box, trace=trace):
                         raise RuntimeError("Failed to submit prompt to DeepSeek web UI.")
                     self.scroll_chat_to_bottom(page)
@@ -2251,6 +2911,7 @@ class DeepSeekWebBridge:
                             self._sticky_messages_since_full = 0
                     if trace is not None:
                         trace.mark("submitted")
+                    logger.warning("DeepSeek submit_prompt submitted")
                     response_text = self.wait_for_response(
                         page,
                         before_count,
@@ -2264,20 +2925,32 @@ class DeepSeekWebBridge:
                     self._refresh_current_chat_url(page)
                     if trace is not None:
                         trace.mark("chat_url_refreshed")
-                    copy_probe_started = time.perf_counter()
+                    copied_text = ""
+                    response_ready_reason = ""
                     if trace is not None:
-                        trace.mark("copy_probe_started")
-                        trace.set("copy_probe_budget_ms", self.copy_probe_max_ms)
-                    copied_text = self.try_copy_last_assistant_text(page, max_total_ms=self.copy_probe_max_ms)
-                    if trace is not None:
-                        trace.set("copy_probe_ms", int((time.perf_counter() - copy_probe_started) * 1000))
-                        trace.set("copy_probe_used", bool(copied_text))
-                        trace.mark("copy_probe_done")
+                        response_ready_reason = str(trace.values.get("response_ready_reason") or "")
+                    if response_ready_reason.startswith("copy_button"):
+                        if trace is not None:
+                            trace.set("copy_probe_budget_ms", 0)
+                            trace.set("copy_probe_ms", 0)
+                            trace.set("copy_probe_used", False)
+                    else:
+                        copy_probe_started = time.perf_counter()
+                        if trace is not None:
+                            trace.mark("copy_probe_started")
+                            trace.set("copy_probe_budget_ms", self.copy_probe_max_ms)
+                        copied_text = self.try_copy_last_assistant_text(page, max_total_ms=self.copy_probe_max_ms)
+                        if trace is not None:
+                            trace.set("copy_probe_ms", int((time.perf_counter() - copy_probe_started) * 1000))
+                            trace.set("copy_probe_used", bool(copied_text))
+                            trace.mark("copy_probe_done")
                     response_has_payload = looks_like_assistant_payload_candidate(response_text)
                     copied_has_payload = looks_like_assistant_payload_candidate(copied_text) if copied_text else False
                     should_replace_with_copy = False
                     if copied_text:
                         if not str(response_text or "").strip():
+                            should_replace_with_copy = True
+                        elif is_suppressed_assistant_payload_text(response_text) and copied_has_payload:
                             should_replace_with_copy = True
                         elif copied_has_payload and not response_has_payload:
                             should_replace_with_copy = True
@@ -2302,6 +2975,7 @@ class DeepSeekWebBridge:
                         trace.mark("submit_prompt_return")
                     return response_text
                 finally:
+                    self._active_request_prompt = previous_active_request_prompt
                     self._save_session_state()
                     transport_capture.close()
             except Exception:
@@ -2315,13 +2989,16 @@ class DeepSeekWebBridge:
         # Guardrail: never surface our own injected bridge prompt as assistant output.
         if is_prompt_replay_text(stripped):
             logger.warning("DeepSeek parse_model_payload suppressed prompt-replay text from model output path.")
-            return {"content": "", "tool_calls": [], "raw_text": raw_text}
+            return {"content": "", "tool_calls": [], "raw_text": raw_text, "parse_error": "prompt_replay"}
         if is_placeholder_assistant_payload_text(stripped):
             logger.warning("DeepSeek parse_model_payload suppressed placeholder schema payload from model output.")
-            return {"content": "", "tool_calls": [], "raw_text": raw_text}
+            return {"content": "", "tool_calls": [], "raw_text": raw_text, "parse_error": "placeholder_payload"}
         if is_empty_assistant_payload_text(stripped):
             logger.warning("DeepSeek parse_model_payload suppressed empty object payload from model output path.")
-            return {"content": "", "tool_calls": [], "raw_text": raw_text}
+            return {"content": "", "tool_calls": [], "raw_text": raw_text, "parse_error": "empty_payload"}
+        if is_low_signal_assistant_payload_text(stripped):
+            logger.warning("DeepSeek parse_model_payload suppressed low-signal protocol ack from model output path.")
+            return {"content": "", "tool_calls": [], "raw_text": raw_text, "parse_error": "low_signal_payload"}
 
         if stripped.startswith("{"):
             try:
@@ -2362,8 +3039,8 @@ class DeepSeekWebBridge:
                 raw_text.strip()[:800],
             )
             if stripped.startswith("{") and '"tool_calls"' in stripped:
-                return {"content": "", "tool_calls": [], "raw_text": raw_text}
-            return {"content": stripped, "tool_calls": [], "raw_text": raw_text}
+                return {"content": "", "tool_calls": [], "raw_text": raw_text, "parse_error": "invalid_json"}
+            return {"content": stripped, "tool_calls": [], "raw_text": raw_text, "parse_error": "invalid_json"}
 
         return self._payload_dict_to_output(payload, raw_text)
 
@@ -2438,6 +3115,8 @@ class DeepSeekWebBridge:
             for offset, substring in enumerate(substrings):
                 if not substring or '"tool_calls"' not in substring:
                     continue
+                if self._is_active_request_echo_text(substring):
+                    continue
                 normalized.append(
                     {
                         "probeId": item.get("probeId"),
@@ -2473,7 +3152,7 @@ class DeepSeekWebBridge:
                 pass
 
             text = choose_best_assistant_text(texts)
-            if text:
+            if text and not self._is_active_request_echo_text(text):
                 candidates.append({"index": index, "text": text})
 
         return candidates
@@ -2627,10 +3306,6 @@ class DeepSeekWebBridge:
                         parent = parent.parentElement;
                     }
 
-                    if (actionBars.length === 0) {
-                        return [];
-                    }
-
                     actionBars.sort((a, b) => {
                         if (a.depth !== b.depth) {
                             return a.depth - b.depth;
@@ -2644,7 +3319,36 @@ class DeepSeekWebBridge:
                     });
 
                     const out = [];
+                    const seenButtons = new Set();
                     let probeId = 0;
+                    const labelFor = (button) => [
+                        button.getAttribute('aria-label') || '',
+                        button.getAttribute('title') || '',
+                        button.innerText || '',
+                        button.textContent || '',
+                    ].join(' ').trim();
+                    const pushButton = (button, meta) => {
+                        if (seenButtons.has(button)) {
+                            return;
+                        }
+                        seenButtons.add(button);
+                        const rect = button.getBoundingClientRect();
+                        button.dataset.deerflowProbeId = String(probeId);
+                        out.push({
+                            probeId: String(probeId),
+                            label: labelFor(button),
+                            className: typeof button.className === 'string' ? button.className : '',
+                            parentClassName: button.parentElement && typeof button.parentElement.className === 'string'
+                                ? button.parentElement.className
+                                : '',
+                            distance: meta.distance,
+                            actionBarClassName: meta.actionBarClassName || '',
+                            actionBarDepth: meta.actionBarDepth,
+                            actionBarButtonCount: meta.actionBarButtonCount,
+                            source: meta.source,
+                        });
+                        probeId += 1;
+                    };
                     for (const actionBar of actionBars) {
                         const orderedButtons = [...actionBar.buttons].sort((a, b) => {
                             const aRect = a.getBoundingClientRect();
@@ -2655,27 +3359,68 @@ class DeepSeekWebBridge:
                             return aRect.left - bRect.left;
                         });
                         for (const button of orderedButtons) {
-                            const label = [
-                                button.getAttribute('aria-label') || '',
-                                button.getAttribute('title') || '',
-                                button.innerText || '',
-                                button.textContent || '',
-                            ].join(' ').trim();
                             const rect = button.getBoundingClientRect();
-                            button.dataset.deerflowProbeId = String(probeId);
-                            out.push({
-                                probeId: String(probeId),
-                                label,
-                                className: typeof button.className === 'string' ? button.className : '',
-                                parentClassName: button.parentElement && typeof button.parentElement.className === 'string'
-                                    ? button.parentElement.className
-                                    : '',
-                                distance: Math.abs(rect.top - targetRect.bottom) + Math.abs(rect.left - targetRect.left),
+                            pushButton(button, {
+                                distance: Math.round(Math.abs(rect.top - targetRect.bottom) + Math.abs(rect.left - targetRect.left)),
                                 actionBarClassName: typeof actionBar.child.className === 'string' ? actionBar.child.className : '',
                                 actionBarDepth: actionBar.depth,
                                 actionBarButtonCount: actionBar.buttons.length,
+                                source: 'action_bar',
                             });
-                            probeId += 1;
+                            if (out.length >= limit) {
+                                break;
+                            }
+                        }
+                        if (out.length >= limit) {
+                            break;
+                        }
+                    }
+
+                    if (out.length < limit) {
+                        const nearbyButtons = [...document.querySelectorAll(buttonSelector)]
+                            .filter(isVisible)
+                            .map((button) => {
+                                if (button === target || target.contains(button)) {
+                                    return null;
+                                }
+                                const rect = button.getBoundingClientRect();
+                                const centerX = rect.left + rect.width / 2;
+                                const centerY = rect.top + rect.height / 2;
+                                const dx = centerX < targetRect.left
+                                    ? targetRect.left - centerX
+                                    : centerX > targetRect.right
+                                        ? centerX - targetRect.right
+                                        : 0;
+                                const dy = centerY < targetRect.top
+                                    ? targetRect.top - centerY
+                                    : centerY > targetRect.bottom
+                                        ? centerY - targetRect.bottom
+                                        : 0;
+                                const edgeDistance = Math.round(dx + dy);
+                                const cornerDistance = Math.round(
+                                    Math.abs(rect.top - targetRect.bottom) + Math.abs(rect.left - targetRect.left)
+                                );
+                                return {button, distance: edgeDistance, cornerDistance};
+                            })
+                            .filter(Boolean)
+                            .filter((item) => item.distance <= 1000 || item.cornerDistance <= 1000)
+                            .sort((a, b) => {
+                                if (a.distance !== b.distance) {
+                                    return a.distance - b.distance;
+                                }
+                                return a.cornerDistance - b.cornerDistance;
+                            });
+                        for (const item of nearbyButtons) {
+                            pushButton(item.button, {
+                                distance: item.distance,
+                                actionBarClassName: '',
+                                actionBarDepth: -1,
+                                actionBarButtonCount: -1,
+                                source: 'nearby',
+                            });
+                            if (out.length >= limit) {
+                                break;
+                            }
                         }
                     }
                     return out.slice(0, limit);
@@ -2691,7 +3436,7 @@ class DeepSeekWebBridge:
         try:
             locator = page.locator(f'[data-deerflow-probe-id="{probe_id}"]').first
             locator.hover(timeout=1500)
-            page.wait_for_timeout(350)
+            page.wait_for_timeout(max(40, COPY_TOOLTIP_WAIT_MS))
             result = page.evaluate(
                 """(probeId) => {
                     const button = document.querySelector(`[data-deerflow-probe-id="${probeId}"]`);
@@ -2763,37 +3508,62 @@ class DeepSeekWebBridge:
         attempts: list[dict[str, Any]] = []
         hover_payload_candidates: list[dict[str, Any]] = []
         locator = self.assistant_locator(page)
-        payload_candidates = sorted(
-            self.visible_payload_candidates(page),
-            key=payload_candidate_score,
-            reverse=True,
-        )
         assistant_candidates: list[dict[str, Any]] = []
-        for payload_candidate in payload_candidates:
-            probe_id = payload_candidate.get("probeId")
-            if not isinstance(probe_id, str):
-                continue
-            assistant_candidates.append(
-                {
-                    "kind": "payload",
-                    "probeId": probe_id,
-                    "text": payload_candidate.get("text", ""),
-                }
-            )
+        locator_seen = False
         for assistant_candidate in sorted(
             self.assistant_text_candidates(locator),
             key=assistant_candidate_score,
             reverse=True,
         ):
+            assistant_text = assistant_candidate.get("text", "")
+            if isinstance(assistant_text, str) and assistant_text.strip():
+                locator_seen = True
+            if isinstance(assistant_text, str) and is_transient_thinking_text(assistant_text):
+                continue
             assistant_candidates.append(
                 {
                     "kind": "locator",
                     "index": assistant_candidate.get("index"),
-                    "text": assistant_candidate.get("text", ""),
+                    "text": assistant_text,
                 }
             )
+        if not locator_seen:
+            payload_candidates = sorted(
+                self.visible_payload_candidates(page),
+                key=payload_candidate_score,
+                reverse=True,
+            )
+            for payload_candidate in payload_candidates:
+                probe_id = payload_candidate.get("probeId")
+                if not isinstance(probe_id, str):
+                    continue
+                payload_text = payload_candidate.get("text", "")
+                if not isinstance(payload_text, str) or not is_assistant_payload_text(payload_text):
+                    continue
+                assistant_candidates.append(
+                    {
+                        "kind": "payload",
+                        "probeId": probe_id,
+                        "text": payload_text,
+                    }
+                )
 
         for assistant_candidate in assistant_candidates:
+            assistant_text = str(assistant_candidate.get("text") or "")
+            embedded_payload = choose_best_payload_text(extract_payload_text_candidates(assistant_text))
+            if (
+                embedded_payload
+                and is_assistant_payload_text(embedded_payload)
+                and not is_suppressed_assistant_payload_text(embedded_payload)
+                and not self._is_active_request_echo_text(embedded_payload)
+            ):
+                logger.warning(
+                    "DeepSeek copy probe returning embedded assistant payload assistant_kind=%s assistant_index=%s payload_chars=%d",
+                    assistant_candidate.get("kind"),
+                    assistant_candidate.get("index"),
+                    len(embedded_payload),
+                )
+                return embedded_payload
             try:
                 if assistant_candidate.get("kind") == "payload":
                     target_probe_id = assistant_candidate.get("probeId")
@@ -2832,7 +3602,10 @@ class DeepSeekWebBridge:
                     continue
                 hover_texts = self.read_hover_texts_near_candidate(page, probe_id)
                 for hover_text in hover_texts:
-                    if looks_like_assistant_payload_candidate(hover_text):
+                    if (
+                        looks_like_assistant_payload_candidate(hover_text)
+                        and not self._is_active_request_echo_text(hover_text)
+                    ):
                         hover_payload_candidates.append(
                             {
                                 "probeId": probe_id,
@@ -2840,7 +3613,13 @@ class DeepSeekWebBridge:
                                 "text": hover_text,
                             }
                         )
+                label = str(candidate.get("label") or "").strip()
                 lowered = {text.strip().lower() for text in hover_texts}
+                label_lower = label.lower()
+                class_lower = " ".join(
+                    str(candidate.get(key) or "").lower()
+                    for key in ("className", "parentClassName", "actionBarClassName")
+                )
                 attempts.append(
                     {
                         "assistantKind": assistant_candidate.get("kind"),
@@ -2848,14 +3627,31 @@ class DeepSeekWebBridge:
                         "assistantProbeId": assistant_candidate.get("probeId"),
                         "assistantPreview": assistant_candidate.get("text", "")[:120],
                         "probeId": probe_id,
+                        "label": label,
                         "distance": candidate.get("distance"),
                         "className": candidate.get("className"),
                         "actionBarDepth": candidate.get("actionBarDepth"),
                         "actionBarButtonCount": candidate.get("actionBarButtonCount"),
+                        "source": candidate.get("source"),
                         "hoverTexts": hover_texts,
                     }
                 )
-                if "copy" not in lowered and "复制" not in lowered:
+                has_copy_label = (
+                    "copy" in lowered
+                    or "复制" in lowered
+                    or "copy" in label_lower
+                    or "复制" in label_lower
+                    or "clipboard" in label_lower
+                    or "clipboard" in class_lower
+                )
+                no_label_close_fallback = (
+                    not label_lower
+                    and not lowered
+                    and COPY_FALLBACK_CLICK_DISTANCE > 0
+                    and normalized_distance <= COPY_FALLBACK_CLICK_DISTANCE
+                    and str(assistant_candidate.get("text", "")).strip()
+                )
+                if not has_copy_label and not no_label_close_fallback:
                     continue
                 try:
                     button = page.locator(f'[data-deerflow-probe-id="{probe_id}"]').first
@@ -2880,6 +3676,8 @@ class DeepSeekWebBridge:
                         copied = copied_payload["text"]
                     elif not looks_like_assistant_payload_candidate(copied) or is_schema_example_payload_text(copied):
                         continue
+                    if self._is_active_request_echo_text(copied):
+                        continue
                     logger.warning(
                         "DeepSeek copy capture succeeded assistant_kind=%s assistant_index=%s assistant_probe_id=%s probe_id=%s distance=%s copied_chars=%d hover_texts=%s",
                         assistant_candidate.get("kind"),
@@ -2893,7 +3691,11 @@ class DeepSeekWebBridge:
                     return copied
 
         hover_payload = choose_best_payload_candidate(hover_payload_candidates)
-        if hover_payload is not None:
+        if (
+            hover_payload is not None
+            and is_assistant_payload_text(hover_payload["text"])
+            and not self._is_active_request_echo_text(hover_payload["text"])
+        ):
             logger.warning(
                 "DeepSeek copy capture fell back to hover payload probe_id=%s payload_chars=%d",
                 hover_payload.get("probeId"),
@@ -2901,7 +3703,10 @@ class DeepSeekWebBridge:
             )
             return hover_payload["text"]
 
-        logger.warning("DeepSeek copy capture did not fire. attempts=%s", attempts)
+        if attempts:
+            logger.warning("DeepSeek copy capture did not fire. attempts=%s", attempts)
+        else:
+            logger.debug("DeepSeek copy capture did not fire; no eligible assistant copy candidates.")
         return ""
 
     def last_assistant_text(self, locator: Locator, page: Page | None = None) -> str:
@@ -2921,6 +3726,8 @@ class DeepSeekWebBridge:
         if is_schema_example_payload_text(fallback):
             return ""
         if is_prompt_replay_text(fallback):
+            return ""
+        if self._is_active_request_echo_text(fallback):
             return ""
         return fallback
 
@@ -2951,7 +3758,7 @@ class DeepSeekWebBridge:
             return [messages[-1]]
         return []
 
-    def best_effort_start_new_chat(self, page: Page, *, trace: DeepSeekTrace | None = None) -> None:
+    def best_effort_start_new_chat(self, page: Page, *, trace: DeepSeekTrace | None = None) -> bool:
         """Try to reset the DeepSeek page to a fresh conversation.
 
         The bridge is intended to be stateless: DeerFlow sends the effective
@@ -2968,7 +3775,7 @@ class DeepSeekWebBridge:
                 if trace is not None:
                     trace.set("new_chat_selector", selector)
                     trace.mark("new_chat_ready")
-                return
+                return True
             except PlaywrightError:
                 continue
             except PlaywrightTimeoutError:
@@ -2977,6 +3784,7 @@ class DeepSeekWebBridge:
         if trace is not None:
             trace.set("new_chat_selector", None)
             trace.mark("new_chat_ready")
+        return False
 
     def first_visible(self, page: Page, selectors: tuple[str, ...]) -> Locator:
         for selector in selectors:
@@ -2991,10 +3799,32 @@ class DeepSeekWebBridge:
         )
 
     def fill_input(self, input_box: Locator, prompt: str) -> None:
-        input_box.click()
-        tag_name = input_box.evaluate("(node) => node.tagName.toLowerCase()")
-        if tag_name == "textarea":
-            input_box.fill(prompt)
+        logger.warning("DeepSeek fill_input click start")
+        try:
+            input_box.click(timeout=500)
+        except Exception:
+            logger.debug("DeepSeek input click skipped before direct value injection.", exc_info=True)
+        logger.warning("DeepSeek fill_input tag read start")
+        tag_name = input_box.evaluate("(node) => node.tagName.toLowerCase()", timeout=1000)
+        logger.warning("DeepSeek fill_input inject start tag=%s chars=%d", tag_name, len(prompt))
+        if tag_name in {"input", "textarea"}:
+            input_box.evaluate(
+                """(node, value) => {
+                    const proto = node instanceof HTMLTextAreaElement
+                        ? HTMLTextAreaElement.prototype
+                        : HTMLInputElement.prototype;
+                    const descriptor = Object.getOwnPropertyDescriptor(proto, 'value');
+                    if (descriptor && typeof descriptor.set === 'function') {
+                        descriptor.set.call(node, value);
+                    } else {
+                        node.value = value;
+                    }
+                    node.dispatchEvent(new Event('input', { bubbles: true }));
+                }""",
+                prompt,
+                timeout=1000,
+            )
+            logger.warning("DeepSeek fill_input inject done tag=%s", tag_name)
             return
         input_box.evaluate(
             """(node, value) => {
@@ -3002,7 +3832,9 @@ class DeepSeekWebBridge:
                 node.dispatchEvent(new Event('input', { bubbles: true }));
             }""",
             prompt,
+            timeout=1000,
         )
+        logger.warning("DeepSeek fill_input inject done tag=%s", tag_name)
 
     def try_submit(self, page: Page, input_box: Locator, *, trace: DeepSeekTrace | None = None) -> bool:
         for selector in self.send_selectors:
@@ -3054,16 +3886,22 @@ class DeepSeekWebBridge:
         while time.time() < deadline:
             self.scroll_chat_to_bottom(page)
             current_count = locator.count()
+            transport_text = transport_capture.best_payload_text() if transport_capture is not None else ""
             if self.force_new_chat:
                 current_snapshot = None
-                current_last_text = self.last_assistant_text(locator, page)
+                if current_count > before_count or transport_text:
+                    current_last_text = self.last_assistant_text(locator, page)
+                else:
+                    current_last_text = ""
             else:
                 current_snapshot = self.assistant_snapshot(locator, page)
                 current_last_text = current_snapshot["text"]
-            transport_text = transport_capture.best_payload_text() if transport_capture is not None else ""
             can_submit = self.can_submit_next_turn(page)
             if not can_submit:
                 generation_busy_seen = True
+            elif transport_text and not generation_busy_seen and transport_capture is not None:
+                transport_capture.clear()
+                transport_text = ""
 
             if self.force_new_chat:
                 assistant_started = (
@@ -3095,6 +3933,17 @@ class DeepSeekWebBridge:
                         trace.set("transport_chars_after_start", len(transport_text))
                     trace.mark("response_started")
                 break
+            now = time.time()
+            if now - last_progress_log >= 5:
+                logger.warning(
+                    "DeepSeek wait_for_response waiting for response current_count=%d current_chars=%d transport_chars=%d transport_candidates=%d can_submit=%s",
+                    current_count,
+                    len(current_last_text),
+                    len(transport_text),
+                    transport_capture.candidate_count if transport_capture is not None else 0,
+                    can_submit,
+                )
+                last_progress_log = now
             page.wait_for_timeout(300)
         else:
             raise TimeoutError("Timed out waiting for DeepSeek response to appear.")
@@ -3127,25 +3976,73 @@ class DeepSeekWebBridge:
         while time.time() < deadline:
             self.scroll_chat_to_bottom(page)
             transport_text = transport_capture.best_payload_text() if transport_capture is not None else ""
+            if transport_text and transport_capture is not None and not generation_busy_seen:
+                if self.can_submit_next_turn(page):
+                    transport_capture.clear()
+                    transport_text = ""
+                else:
+                    generation_busy_seen = True
             if transport_text and is_prompt_replay_text(transport_text):
                 # Transport channel can occasionally include echoed request-side prompt;
                 # skip these candidates and continue waiting for real assistant content.
                 transport_text = ""
             if transport_text:
                 if is_assistant_payload_text(transport_text):
-                    if is_placeholder_assistant_payload_text(transport_text):
-                        if placeholder_wait_rounds < placeholder_wait_limit:
+                    if is_empty_assistant_payload_text(transport_text):
+                        current_for_empty = ""
+                        try:
+                            current_for_empty = self.last_assistant_text(locator, page)
+                        except Exception:
+                            current_for_empty = ""
+                        if current_for_empty and not is_transient_thinking_text(current_for_empty) and not is_suppressed_assistant_payload_text(current_for_empty):
+                            transport_text = ""
+                        elif is_transient_thinking_text(current_for_empty):
+                            page.wait_for_timeout(min(self.stable_poll_interval_ms, 200))
+                            continue
+                        elif placeholder_wait_rounds < placeholder_wait_limit:
                             placeholder_wait_rounds += 1
                             page.wait_for_timeout(min(self.stable_poll_interval_ms, 200))
                             continue
-                        logger.warning("DeepSeek wait_for_response suppressing placeholder transport payload after retries.")
-                        return '{"content":"","tool_calls":[]}'
-                    if trace is not None:
-                        trace.set("response_chars", len(transport_text))
-                        trace.set("response_ready_reason", "transport_assistant_payload")
-                        trace.set("transport_candidate_count", transport_capture.candidate_count)
-                        trace.mark("response_stable")
-                    return transport_text
+                        else:
+                            logger.warning("DeepSeek wait_for_response suppressing empty transport payload after retries.")
+                            return '{"content":"","tool_calls":[]}'
+                    if is_placeholder_assistant_payload_text(transport_text):
+                        current_for_placeholder = ""
+                        try:
+                            current_for_placeholder = self.last_assistant_text(locator, page)
+                        except Exception:
+                            current_for_placeholder = ""
+                        if current_for_placeholder and not is_transient_thinking_text(current_for_placeholder) and not is_suppressed_assistant_payload_text(current_for_placeholder):
+                            transport_text = ""
+                        elif placeholder_wait_rounds < placeholder_wait_limit:
+                            placeholder_wait_rounds += 1
+                            page.wait_for_timeout(min(self.stable_poll_interval_ms, 200))
+                            continue
+                        else:
+                            logger.warning("DeepSeek wait_for_response suppressing placeholder transport payload after retries.")
+                            return '{"content":"","tool_calls":[]}'
+                    if is_low_signal_assistant_payload_text(transport_text):
+                        current_for_low_signal = ""
+                        try:
+                            current_for_low_signal = self.last_assistant_text(locator, page)
+                        except Exception:
+                            current_for_low_signal = ""
+                        if current_for_low_signal and not is_transient_thinking_text(current_for_low_signal) and not is_suppressed_assistant_payload_text(current_for_low_signal):
+                            transport_text = ""
+                        elif placeholder_wait_rounds < placeholder_wait_limit:
+                            placeholder_wait_rounds += 1
+                            page.wait_for_timeout(min(self.stable_poll_interval_ms, 200))
+                            continue
+                        else:
+                            logger.warning("DeepSeek wait_for_response suppressing low-signal transport payload after retries.")
+                            return '{"content":"","tool_calls":[]}'
+                    if transport_text:
+                        if trace is not None:
+                            trace.set("response_chars", len(transport_text))
+                            trace.set("response_ready_reason", "transport_assistant_payload")
+                            trace.set("transport_candidate_count", transport_capture.candidate_count)
+                            trace.mark("response_stable")
+                        return transport_text
 
             if transport_text and transport_text == last_transport_text:
                 stable_transport_seen += 1
@@ -3156,14 +4053,39 @@ class DeepSeekWebBridge:
             current_count = locator.count()
             if self.force_new_chat:
                 current_snapshot = None
-                current = self.last_assistant_text(locator, page)
+                current = self.last_assistant_text(locator, page) if current_count > before_count else ""
                 current_index = -1
             else:
                 current_snapshot = self.assistant_snapshot(locator, page)
                 current = current_snapshot["text"]
                 current_index = current_snapshot["index"]
             has_advanced = assistant_has_advanced(current_count, current_index, current)
+            if has_advanced and current and is_transient_thinking_text(current):
+                generation_busy_seen = True
+                now = time.time()
+                if now - last_progress_log >= 5:
+                    logger.warning(
+                        "DeepSeek wait_for_response transient thinking assistant_chars=%d transport_chars=%d transport_candidates=%d",
+                        len(current),
+                        len(transport_text),
+                        transport_capture.candidate_count if transport_capture is not None else 0,
+                    )
+                    last_progress_log = now
+                page.wait_for_timeout(min(self.stable_poll_interval_ms, 200))
+                continue
             if current:
+                if has_advanced:
+                    embedded_payload = choose_best_payload_text(extract_payload_text_candidates(current))
+                    if (
+                        embedded_payload
+                        and is_assistant_payload_text(embedded_payload)
+                        and not is_suppressed_assistant_payload_text(embedded_payload)
+                    ):
+                        if trace is not None:
+                            trace.set("response_chars", len(embedded_payload))
+                            trace.set("response_ready_reason", "dom_embedded_payload")
+                            trace.mark("response_stable")
+                        return embedded_payload
                 if has_advanced and self.can_submit_next_turn(page):
                     copied = self.try_copy_last_assistant_text(page)
                     if copied:
@@ -3196,16 +4118,11 @@ class DeepSeekWebBridge:
                     except Exception:
                         pass
                 if has_advanced and looks_like_assistant_payload_candidate(current) and self.can_submit_next_turn(page):
-                    if trace is not None:
-                        trace.set("response_chars", len(current))
-                        trace.set("response_ready_reason", "tool_payload_submit_ready")
-                        trace.mark("response_stable")
-                    logger.warning(
-                        "DeepSeek wait_for_response returning when submit became ready assistant_chars=%d transport_candidates=%d",
-                        len(current),
-                        transport_capture.candidate_count if transport_capture is not None else 0,
-                    )
-                    return current
+                    # Some web UIs re-enable submit before the markdown block has fully
+                    # committed to the DOM. Returning an incomplete JSON tool payload here
+                    # drops the tool call, so wait for either parseable JSON or stable text.
+                    page.wait_for_timeout(min(self.stable_poll_interval_ms, 200))
+                    continue
 
             if current and current == last_text:
                 stable_seen += 1
@@ -3227,19 +4144,51 @@ class DeepSeekWebBridge:
                 if is_prompt_replay_text(transport_text):
                     page.wait_for_timeout(min(self.stable_poll_interval_ms, 200))
                     continue
-                if is_placeholder_assistant_payload_text(transport_text):
-                    if placeholder_wait_rounds < placeholder_wait_limit:
+                if is_empty_assistant_payload_text(transport_text):
+                    current_for_empty = ""
+                    try:
+                        current_for_empty = self.last_assistant_text(locator, page)
+                    except Exception:
+                        current_for_empty = ""
+                    if current_for_empty and not is_transient_thinking_text(current_for_empty) and not is_suppressed_assistant_payload_text(current_for_empty):
+                        transport_text = ""
+                    elif is_transient_thinking_text(current_for_empty):
+                        page.wait_for_timeout(min(self.stable_poll_interval_ms, 200))
+                        continue
+                    elif placeholder_wait_rounds < placeholder_wait_limit:
                         placeholder_wait_rounds += 1
                         page.wait_for_timeout(min(self.stable_poll_interval_ms, 200))
                         continue
-                    logger.warning("DeepSeek wait_for_response suppressing stable placeholder transport payload.")
-                    return '{"content":"","tool_calls":[]}'
-                if trace is not None:
-                    trace.set("response_chars", len(transport_text))
-                    trace.set("response_ready_reason", "transport_stable_text")
-                    trace.set("transport_candidate_count", transport_capture.candidate_count if transport_capture else 0)
-                    trace.mark("response_stable")
-                return transport_text
+                    else:
+                        logger.warning("DeepSeek wait_for_response suppressing stable empty transport payload.")
+                        return '{"content":"","tool_calls":[]}'
+                if is_placeholder_assistant_payload_text(transport_text):
+                    if current and not is_transient_thinking_text(current) and not is_suppressed_assistant_payload_text(current):
+                        transport_text = ""
+                    elif placeholder_wait_rounds < placeholder_wait_limit:
+                        placeholder_wait_rounds += 1
+                        page.wait_for_timeout(min(self.stable_poll_interval_ms, 200))
+                        continue
+                    else:
+                        logger.warning("DeepSeek wait_for_response suppressing stable placeholder transport payload.")
+                        return '{"content":"","tool_calls":[]}'
+                if is_low_signal_assistant_payload_text(transport_text):
+                    if current and not is_transient_thinking_text(current) and not is_suppressed_assistant_payload_text(current):
+                        transport_text = ""
+                    elif placeholder_wait_rounds < placeholder_wait_limit:
+                        placeholder_wait_rounds += 1
+                        page.wait_for_timeout(min(self.stable_poll_interval_ms, 200))
+                        continue
+                    else:
+                        logger.warning("DeepSeek wait_for_response suppressing stable low-signal transport payload.")
+                        return '{"content":"","tool_calls":[]}'
+                if transport_text:
+                    if trace is not None:
+                        trace.set("response_chars", len(transport_text))
+                        trace.set("response_ready_reason", "transport_stable_text")
+                        trace.set("transport_candidate_count", transport_capture.candidate_count if transport_capture else 0)
+                        trace.mark("response_stable")
+                    return transport_text
             if has_advanced and current and stable_seen >= self.stable_rounds:
                 if is_placeholder_assistant_payload_text(current):
                     if placeholder_wait_rounds < placeholder_wait_limit:

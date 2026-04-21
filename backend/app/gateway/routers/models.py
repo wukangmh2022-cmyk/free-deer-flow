@@ -6,6 +6,10 @@ from deerflow.config import get_app_config
 router = APIRouter(prefix="/api", tags=["models"])
 
 
+def _is_hidden_gui_model(model_name: str) -> bool:
+    return "sticky" in model_name
+
+
 class ModelResponse(BaseModel):
     """Response model for model information."""
 
@@ -69,6 +73,7 @@ async def list_models() -> ModelsListResponse:
             supports_reasoning_effort=model.supports_reasoning_effort,
         )
         for model in config.models
+        if not _is_hidden_gui_model(model.name)
     ]
     return ModelsListResponse(models=models)
 

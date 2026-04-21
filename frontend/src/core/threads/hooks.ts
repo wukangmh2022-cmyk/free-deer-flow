@@ -18,6 +18,35 @@ import { promptInputFilePartToFile, uploadFiles } from "../uploads";
 
 import type { AgentThread, AgentThreadState } from "./types";
 
+const THREADS_CACHE_KEY = "deerflow:desktop:threads-cache";
+
+function readThreadsCache(): AgentThread[] | undefined {
+  if (typeof window === "undefined") {
+    return undefined;
+  }
+  try {
+    const raw = window.sessionStorage.getItem(THREADS_CACHE_KEY);
+    if (!raw) {
+      return undefined;
+    }
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? (parsed as AgentThread[]) : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function writeThreadsCache(threads: AgentThread[] | undefined): void {
+  if (typeof window === "undefined" || !threads) {
+    return;
+  }
+  try {
+    window.sessionStorage.setItem(THREADS_CACHE_KEY, JSON.stringify(threads));
+  } catch {
+    // Ignore storage failures; this is only a UI cache.
+  }
+}
+
 export type ToolEndEvent = {
   name: string;
   data: unknown;
@@ -28,6 +57,7 @@ export type ThreadStreamOptions = {
   context: LocalSettings["context"];
   isMock?: boolean;
   initialThreadMetadata?: Record<string, unknown>;
+  autoCreateOnFirstSubmit?: boolean;
   onStart?: (threadId: string) => void;
   onFinish?: (state: AgentThreadState) => void;
   onToolEnd?: (event: ToolEndEvent) => void;
@@ -235,6 +265,7 @@ export function useThreadStream({
   context,
   isMock,
   initialThreadMetadata,
+  autoCreateOnFirstSubmit = true,
   onStart,
   onFinish,
   onToolEnd,
@@ -471,6 +502,9 @@ export function useThreadStream({
       // When starting a brand-new thread, create it first so metadata such as
       // the chosen workspace is persisted before the first run starts.
       if (!threadIdRef.current) {
+        if (!autoCreateOnFirstSubmit) {
+          throw new Error("Thread is not ready yet.");
+        }
         await ensureGatewayThread(threadId, initialThreadMetadata ?? {});
         activeThreadId = threadId;
         threadIdRef.current = activeThreadId;
@@ -620,6 +654,7 @@ export function useThreadStream({
       context,
       queryClient,
       initialThreadMetadata,
+      autoCreateOnFirstSubmit,
     ],
   );
 
@@ -656,8 +691,10 @@ export function useThreads(
     select: ["thread_id", "updated_at", "values"],
   },
 ) {
-  return useQuery<AgentThread[]>({
+  const query = useQuery<AgentThread[]>({
     queryKey: ["threads", "search", params],
+    initialData: readThreadsCache,
+    placeholderData: (previousData) => previousData,
     queryFn: async () => {
       const maxResults = params.limit;
       const initialOffset = params.offset ?? 0;
@@ -709,7 +746,14 @@ export function useThreads(
       return threads;
     },
     refetchOnWindowFocus: false,
+    staleTime: 10_000,
   });
+
+  useEffect(() => {
+    writeThreadsCache(query.data);
+  }, [query.data]);
+
+  return query;
 }
 
 export function useDeleteThread() {

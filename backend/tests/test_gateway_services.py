@@ -231,6 +231,8 @@ def test_context_merges_into_configurable():
     config = build_run_config("thread-1", None, None)
 
     context = {
+        "agent_name": "dsweb",
+        "is_bootstrap": True,
         "model_name": "deepseek-v3",
         "mode": "ultra",
         "context_compression_enabled": True,
@@ -243,6 +245,8 @@ def test_context_merges_into_configurable():
     }
 
     _CONTEXT_CONFIGURABLE_KEYS = {
+        "agent_name",
+        "is_bootstrap",
         "model_name",
         "mode",
         "context_compression_enabled",
@@ -257,6 +261,8 @@ def test_context_merges_into_configurable():
         if key in context:
             configurable.setdefault(key, context[key])
 
+    assert config["configurable"]["agent_name"] == "dsweb"
+    assert config["configurable"]["is_bootstrap"] is True
     assert config["configurable"]["model_name"] == "deepseek-v3"
     assert config["configurable"]["context_compression_enabled"] is True
     assert config["configurable"]["thinking_enabled"] is True
@@ -282,12 +288,16 @@ def test_context_does_not_override_existing_configurable():
     )
 
     context = {
+        "agent_name": "dsweb",
+        "is_bootstrap": True,
         "model_name": "deepseek-v3",
         "is_plan_mode": True,
         "subagent_enabled": True,
     }
 
     _CONTEXT_CONFIGURABLE_KEYS = {
+        "agent_name",
+        "is_bootstrap",
         "model_name",
         "mode",
         "thinking_enabled",
@@ -305,6 +315,8 @@ def test_context_does_not_override_existing_configurable():
     assert config["configurable"]["model_name"] == "gpt-4"
     assert config["configurable"]["is_plan_mode"] is False
     # New values should be added
+    assert config["configurable"]["agent_name"] == "dsweb"
+    assert config["configurable"]["is_bootstrap"] is True
     assert config["configurable"]["subagent_enabled"] is True
 
 

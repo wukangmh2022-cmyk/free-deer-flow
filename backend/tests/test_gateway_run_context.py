@@ -77,6 +77,51 @@ async def test_start_run_preserves_workspace_context(monkeypatch):
 
 
 @pytest.mark.anyio
+async def test_start_run_mirrors_agent_bootstrap_context_into_configurable(monkeypatch):
+    captured: dict[str, object] = {}
+
+    async def fake_run_agent(*args, **kwargs):
+        captured["config"] = kwargs["config"]
+
+    request = SimpleNamespace(
+        app=SimpleNamespace(
+            state=SimpleNamespace(
+                stream_bridge=MemoryStreamBridge(),
+                run_manager=RunManager(),
+                checkpointer=_CheckpointerStub(),
+                store=None,
+            )
+        )
+    )
+
+    body = RunCreateRequest(
+        input={"messages": [{"role": "user", "content": "连续调用5个工具测试一下"}]},
+        context={
+            "agent_name": "dsweb",
+            "is_bootstrap": True,
+            "model_name": "deepseek-web-deerflow",
+        },
+    )
+
+    monkeypatch.setattr("app.gateway.services.run_agent", fake_run_agent)
+    monkeypatch.setattr("app.gateway.services.resolve_agent_factory", lambda _assistant_id: object())
+
+    record = await start_run(body, "thread-456", request)
+    assert record.task is not None
+    await record.task
+
+    assert captured["config"]["context"] == {
+        "agent_name": "dsweb",
+        "is_bootstrap": True,
+        "model_name": "deepseek-web-deerflow",
+        "thread_id": "thread-456",
+    }
+    assert captured["config"]["configurable"]["agent_name"] == "dsweb"
+    assert captured["config"]["configurable"]["is_bootstrap"] is True
+    assert captured["config"]["configurable"]["model_name"] == "deepseek-web-deerflow"
+
+
+@pytest.mark.anyio
 async def test_start_run_inherits_bound_workspace_from_thread_metadata(monkeypatch):
     captured: dict[str, object] = {}
     store = _StoreStub(

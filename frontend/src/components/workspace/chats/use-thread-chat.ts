@@ -1,14 +1,18 @@
 "use client";
 
-import { useParams, usePathname, useSearchParams } from "next/navigation";
+import { usePathname, useSearchParams } from "next/navigation";
 import { useEffect, useState } from "react";
 
 import { uuid } from "@/core/utils/uuid";
 
-export function useThreadChat() {
-  const { thread_id: threadIdFromPath } = useParams<{ thread_id: string }>();
-  const pathname = usePathname();
+function resolveThreadIdFromPathname(pathname: string): string | undefined {
+  const match = pathname.match(/\/workspace\/(?:agents\/[^/]+\/chats|chats)\/([^/?#]+)/);
+  return match?.[1];
+}
 
+export function useThreadChat() {
+  const pathname = usePathname();
+  const threadIdFromPath = resolveThreadIdFromPathname(pathname) ?? "new";
   const searchParams = useSearchParams();
   const [threadId, setThreadId] = useState(() => {
     return threadIdFromPath === "new" ? uuid() : threadIdFromPath;

@@ -1,4 +1,4 @@
-import { useParams, useSearchParams } from "next/navigation";
+import { usePathname, useSearchParams } from "next/navigation";
 import { useEffect, useMemo, useRef } from "react";
 
 import { usePromptInputController } from "@/components/ai-elements/prompt-input";
@@ -9,7 +9,10 @@ import { useI18n } from "@/core/i18n/hooks";
  */
 export function useSpecificChatMode() {
   const { t } = useI18n();
-  const { thread_id: threadIdFromPath } = useParams<{ thread_id: string }>();
+  const pathname = usePathname();
+  const threadIdFromPath =
+    pathname.match(/\/workspace\/(?:agents\/[^/]+\/chats|chats)\/([^/?#]+)/)?.[1] ??
+    "new";
   const searchParams = useSearchParams();
   const promptInputController = usePromptInputController();
   const inputInitialValue = useMemo(() => {

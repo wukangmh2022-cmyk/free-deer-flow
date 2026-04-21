@@ -342,6 +342,14 @@ export interface Translations {
     appearance: {
       themeTitle: string;
       themeDescription: string;
+      colorThemeTitle: string;
+      colorThemeDescription: string;
+      warm: string;
+      warmDescription: string;
+      stone: string;
+      stoneDescription: string;
+      blue: string;
+      blueDescription: string;
       system: string;
       light: string;
       dark: string;

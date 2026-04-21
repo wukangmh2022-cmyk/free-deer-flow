@@ -13,9 +13,11 @@ function getInternalServiceURL(envKey, fallbackURL) {
 import nextra from "nextra";
 
 const withNextra = nextra({});
+const isDesktopStaticBuild = process.env.DEER_FLOW_DESKTOP_STATIC === "1";
 
 /** @type {import("next").NextConfig} */
 const config = {
+  output: isDesktopStaticBuild ? "export" : "standalone",
   i18n: {
     locales: ["en", "zh"],
     defaultLocale: "en",
@@ -35,7 +37,7 @@ const config = {
       "http://127.0.0.1:8001",
     );
 
-    if (!process.env.NEXT_PUBLIC_LANGGRAPH_BASE_URL) {
+    if (!isDesktopStaticBuild && !process.env.NEXT_PUBLIC_LANGGRAPH_BASE_URL) {
       rewrites.push({
         source: "/api/langgraph",
         destination: langgraphURL,
@@ -44,9 +46,17 @@ const config = {
         source: "/api/langgraph/:path*",
         destination: `${langgraphURL}/:path*`,
       });
+      rewrites.push({
+        source: "/api/langgraph-compat",
+        destination: `${gatewayURL}/api/langgraph-compat`,
+      });
+      rewrites.push({
+        source: "/api/langgraph-compat/:path*",
+        destination: `${gatewayURL}/api/langgraph-compat/:path*`,
+      });
     }
 
-    if (!process.env.NEXT_PUBLIC_BACKEND_BASE_URL) {
+    if (!isDesktopStaticBuild && !process.env.NEXT_PUBLIC_BACKEND_BASE_URL) {
       rewrites.push({
         source: "/api/agents",
         destination: `${gatewayURL}/api/agents`,
@@ -54,6 +64,14 @@ const config = {
       rewrites.push({
         source: "/api/agents/:path*",
         destination: `${gatewayURL}/api/agents/:path*`,
+      });
+      rewrites.push({
+        source: "/api/provider-auth",
+        destination: `${gatewayURL}/api/provider-auth`,
+      });
+      rewrites.push({
+        source: "/api/provider-auth/:path*",
+        destination: `${gatewayURL}/api/provider-auth/:path*`,
       });
     }
 

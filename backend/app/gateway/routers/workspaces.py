@@ -32,6 +32,11 @@ class WorkspaceBrowseResponse(BaseModel):
     entries: list[WorkspaceItem] = Field(default_factory=list)
 
 
+class WorkspaceCreateFolderRequest(BaseModel):
+    path: str = Field(description="Absolute host path of the parent directory.")
+    name: str = Field(description="Folder name to create under the given path.")
+
+
 def _safe_workspace_id(path: Path) -> str:
     return str(path).replace("/", "_").replace("\\", "_").strip("_") or "workspace"
 
@@ -88,6 +93,17 @@ def _resolve_mount_for_path(path: Path) -> tuple[Path, str, bool] | None:
         if best_match is None or len(str(host_root)) > len(str(best_match[0])):
             best_match = (host_root, container_root, read_only)
     return best_match
+
+
+def _validate_child_name(name: str) -> str:
+    normalized = name.strip()
+    if not normalized:
+        raise HTTPException(status_code=422, detail="Folder name cannot be empty.")
+    if normalized in {".", ".."}:
+        raise HTTPException(status_code=422, detail="Invalid folder name.")
+    if "/" in normalized or "\\" in normalized:
+        raise HTTPException(status_code=422, detail="Folder name cannot contain path separators.")
+    return normalized
 
 
 def _iter_workspace_candidates() -> list[WorkspaceItem]:
@@ -177,4 +193,45 @@ async def browse_workspaces(path: str = Query(..., description="Absolute host pa
         parent=parent,
         children=children,
         entries=entries,
+    )
+
+
+@router.post("/folders", response_model=WorkspaceItem)
+async def create_workspace_folder(
+    request: WorkspaceCreateFolderRequest,
+) -> WorkspaceItem:
+    parent = Path(request.path).expanduser().resolve()
+    mount = _resolve_mount_for_path(parent)
+    if mount is None:
+        raise HTTPException(status_code=404, detail="Workspace path is not within a configured mount.")
+
+    host_root, container_root, read_only = mount
+    if read_only:
+        raise HTTPException(status_code=403, detail="Workspace mount is read-only.")
+    if not parent.exists() or not parent.is_dir():
+        raise HTTPException(status_code=404, detail="Workspace path does not exist or is not a directory.")
+
+    child_name = _validate_child_name(request.name)
+    destination = (parent / child_name).resolve()
+
+    try:
+        destination.relative_to(host_root)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail="Folder path escapes the configured workspace mount.") from exc
+
+    if destination.exists():
+        raise HTTPException(status_code=409, detail="Folder already exists.")
+
+    try:
+        destination.mkdir(parents=False, exist_ok=False)
+    except FileExistsError as exc:
+        raise HTTPException(status_code=409, detail="Folder already exists.") from exc
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to create folder: {exc}") from exc
+
+    return _workspace_item_for_path(
+        destination,
+        host_root=host_root,
+        container_root=container_root,
+        read_only=read_only,
     )

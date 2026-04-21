@@ -155,6 +155,24 @@ LOG_TIMING = os.environ.get("DEEPSEEK_WEB_LOG_TIMING", "1").strip().lower() not 
     "",
 }
 
+
+def _playwright_launch_overrides() -> dict[str, Any]:
+    overrides: dict[str, Any] = {}
+    executable_path = os.environ.get("DEER_FLOW_PLAYWRIGHT_EXECUTABLE_PATH", "").strip()
+    browser_channel = os.environ.get("DEER_FLOW_PLAYWRIGHT_BROWSER_CHANNEL", "").strip()
+
+    if executable_path:
+        resolved_path = Path(executable_path).expanduser()
+        if resolved_path.exists():
+            overrides["executable_path"] = str(resolved_path)
+        else:
+            logger.warning("Configured Playwright browser executable does not exist: %s", executable_path)
+
+    if "executable_path" not in overrides and browser_channel:
+        overrides["channel"] = browser_channel
+
+    return overrides
+
 STRICT_JSON_FORMAT_PROMPT = (
     "【非常重要，必须严格遵守输出协议】\n"
     "你现在不是在普通聊天。你的输出会被机器直接解析。\n"
@@ -1656,10 +1674,14 @@ class DeepSeekWebBridge:
 
             self._playwright = sync_playwright().start()
             self._browser_type = self._playwright.chromium
+            launch_kwargs: dict[str, Any] = {
+                "user_data_dir": profile_dir,
+                "headless": requested_headless,
+                "viewport": {"width": 1440, "height": 960},
+            }
+            launch_kwargs.update(_playwright_launch_overrides())
             self._context = self._browser_type.launch_persistent_context(
-                user_data_dir=profile_dir,
-                headless=requested_headless,
-                viewport={"width": 1440, "height": 960},
+                **launch_kwargs
             )
             self._actual_headless = requested_headless
             return self._context

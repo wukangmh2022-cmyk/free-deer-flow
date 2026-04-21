@@ -7,9 +7,10 @@
   "scripts": {
     "dev": "pnpm run dev:static",
     "dev:static": "pnpm run prepare:frontend && DEER_FLOW_USE_STATIC_FRONTEND=1 electron .",
-    "dist:mac": "electron-builder --mac dir",
-    "dist:dmg": "electron-builder --mac dmg",
+    "dist:mac": "pnpm run prepare:frontend && pnpm run prepare:mac-python && electron-builder --mac dir",
+    "dist:dmg": "pnpm run prepare:frontend && pnpm run prepare:mac-python && electron-builder --mac dmg",
     "prepare:frontend": "node ./scripts/build-static-frontend.mjs",
+    "prepare:mac-python": "bash ../../scripts/prepare-mac-python-runtime.sh",
     "prepare:win-python": "powershell -ExecutionPolicy Bypass -File ../../scripts/prepare-windows-python-runtime.ps1",
     "dist:win:dir": "pnpm run prepare:frontend && electron-builder --win dir --x64 --publish never",
     "dist:win:thin": "pnpm run prepare:frontend && electron-builder --win dir --x64 --publish never",
@@ -58,8 +59,7 @@
           "!README.md",
           "!CLAUDE.md",
           "!AGENTS.md",
-          "!CONTRIBUTING.md",
-          "!uv.lock"
+          "!CONTRIBUTING.md"
         ]
       },
       {

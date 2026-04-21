@@ -47,6 +47,7 @@ const STATIC_SERVER_ENTRY = app.isPackaged
   : path.join(REPO_ROOT, "desktop", "electron", "static-server.cjs");
 const RUNTIME_PYTHON_DIR = path.join(REPO_ROOT, "python");
 const PLAYWRIGHT_BROWSERS_DIR = path.join(RUNTIME_PYTHON_DIR, "ms-playwright");
+const RUNTIME_BUILD_INFO_PATH = path.join(RUNTIME_PYTHON_DIR, "runtime-build.json");
 const RUNTIME_PYTHON_EXE_CANDIDATES = IS_WINDOWS
   ? [
       path.join(RUNTIME_PYTHON_DIR, "python.exe"),
@@ -93,6 +94,23 @@ const DEFAULT_EXTENSIONS_CONFIG = `${JSON.stringify(
   null,
   2
 )}\n`;
+
+const readRuntimeBuildInfo = () => {
+  if (!fs.existsSync(RUNTIME_BUILD_INFO_PATH)) {
+    return null;
+  }
+  try {
+    return JSON.parse(fs.readFileSync(RUNTIME_BUILD_INFO_PATH, "utf8"));
+  } catch {
+    return null;
+  }
+};
+
+const RUNTIME_BUILD_INFO = readRuntimeBuildInfo();
+const PLAYWRIGHT_BROWSER_MODE =
+  process.env.DEER_FLOW_PLAYWRIGHT_BROWSER_MODE ||
+  (RUNTIME_BUILD_INFO && RUNTIME_BUILD_INFO.playwrightBrowserMode) ||
+  "bundled";
 
 const logLine = (msg) => {
   try {
@@ -159,6 +177,84 @@ const getBundledPlaywrightBrowserDir = () => {
     .map((entry) => path.join(PLAYWRIGHT_BROWSERS_DIR, entry.name));
   return candidates[0] || null;
 };
+
+const detectSystemPlaywrightBrowser = () => {
+  const explicitExecutablePath = process.env.DEER_FLOW_PLAYWRIGHT_EXECUTABLE_PATH;
+  if (explicitExecutablePath && fs.existsSync(explicitExecutablePath)) {
+    return {
+      kind: "custom",
+      executablePath: explicitExecutablePath,
+      channel: process.env.DEER_FLOW_PLAYWRIGHT_BROWSER_CHANNEL || undefined
+    };
+  }
+
+  const explicitChannel = process.env.DEER_FLOW_PLAYWRIGHT_BROWSER_CHANNEL;
+  if (explicitChannel) {
+    return {
+      kind: explicitChannel,
+      channel: explicitChannel
+    };
+  }
+
+  if (IS_WINDOWS) {
+    const localAppData = process.env.LOCALAPPDATA || path.join(USER_HOME, "AppData", "Local");
+    const programFiles = process.env.ProgramFiles || "C:\\Program Files";
+    const programFilesX86 = process.env["ProgramFiles(x86)"] || "C:\\Program Files (x86)";
+    const candidates = [
+      {
+        kind: "msedge",
+        channel: "msedge",
+        executablePath: path.join(programFilesX86, "Microsoft", "Edge", "Application", "msedge.exe")
+      },
+      {
+        kind: "msedge",
+        channel: "msedge",
+        executablePath: path.join(programFiles, "Microsoft", "Edge", "Application", "msedge.exe")
+      },
+      {
+        kind: "msedge",
+        channel: "msedge",
+        executablePath: path.join(localAppData, "Microsoft", "Edge", "Application", "msedge.exe")
+      },
+      {
+        kind: "chrome",
+        channel: "chrome",
+        executablePath: path.join(programFiles, "Google", "Chrome", "Application", "chrome.exe")
+      },
+      {
+        kind: "chrome",
+        channel: "chrome",
+        executablePath: path.join(programFilesX86, "Google", "Chrome", "Application", "chrome.exe")
+      },
+      {
+        kind: "chrome",
+        channel: "chrome",
+        executablePath: path.join(localAppData, "Google", "Chrome", "Application", "chrome.exe")
+      }
+    ];
+    return candidates.find((candidate) => fs.existsSync(candidate.executablePath)) || null;
+  }
+
+  if (process.platform === "darwin") {
+    const candidates = [
+      {
+        kind: "msedge",
+        channel: "msedge",
+        executablePath: "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge"
+      },
+      {
+        kind: "chrome",
+        channel: "chrome",
+        executablePath: "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+      }
+    ];
+    return candidates.find((candidate) => fs.existsSync(candidate.executablePath)) || null;
+  }
+
+  return null;
+};
+
+const getSystemPlaywrightBrowser = () => detectSystemPlaywrightBrowser();
 
 const pythonCommandExists = () => commandExists("python3") || commandExists("python");
 
@@ -229,13 +325,17 @@ const collectStartupProblems = () => {
   }
 
   if (!resolvePythonRuntime()) {
-      problems.push(
+    problems.push(
       `no Python runtime found: expected bundled runtime at one of ${RUNTIME_PYTHON_EXE_CANDIDATES.join(", ")} or one of uv/python3/python on PATH`
     );
   }
 
-  if (app.isPackaged && !getBundledPlaywrightBrowserDir()) {
+  if (app.isPackaged && PLAYWRIGHT_BROWSER_MODE === "bundled" && !getBundledPlaywrightBrowserDir()) {
     problems.push(`missing bundled Playwright Chromium under ${PLAYWRIGHT_BROWSERS_DIR}`);
+  }
+
+  if (app.isPackaged && PLAYWRIGHT_BROWSER_MODE === "system" && !getSystemPlaywrightBrowser()) {
+    problems.push("no supported local Microsoft Edge or Google Chrome installation found for thin-no-browser mode");
   }
 
   const requiredCommands = [];
@@ -262,6 +362,21 @@ const spawnLogged = (command, args, cwd, logName, envOverrides = {}) => {
   fs.mkdirSync(LOG_DIR, { recursive: true });
   const extensionsConfigPath = ensureDesktopExtensionsConfig();
   const packagedSkillsPath = path.join(process.resourcesPath, "runtime", "skills");
+  const systemPlaywrightBrowser = getSystemPlaywrightBrowser();
+  const playwrightEnv = {
+    DEER_FLOW_PLAYWRIGHT_BROWSER_MODE: PLAYWRIGHT_BROWSER_MODE
+  };
+  if (process.env.PLAYWRIGHT_BROWSERS_PATH) {
+    playwrightEnv.PLAYWRIGHT_BROWSERS_PATH = process.env.PLAYWRIGHT_BROWSERS_PATH;
+  } else if (PLAYWRIGHT_BROWSER_MODE === "bundled" && app.isPackaged) {
+    playwrightEnv.PLAYWRIGHT_BROWSERS_PATH = PLAYWRIGHT_BROWSERS_DIR;
+  }
+  if (systemPlaywrightBrowser && systemPlaywrightBrowser.channel) {
+    playwrightEnv.DEER_FLOW_PLAYWRIGHT_BROWSER_CHANNEL = systemPlaywrightBrowser.channel;
+  }
+  if (systemPlaywrightBrowser && systemPlaywrightBrowser.executablePath) {
+    playwrightEnv.DEER_FLOW_PLAYWRIGHT_EXECUTABLE_PATH = systemPlaywrightBrowser.executablePath;
+  }
   const out = fs.openSync(path.join(LOG_DIR, logName), "a");
   const child = spawn(command, args, {
     cwd,
@@ -282,9 +397,7 @@ const spawnLogged = (command, args, cwd, logName, envOverrides = {}) => {
       DEER_FLOW_HOST_SKILLS_PATH:
         process.env.DEER_FLOW_HOST_SKILLS_PATH ||
         (app.isPackaged ? packagedSkillsPath : undefined),
-      PLAYWRIGHT_BROWSERS_PATH:
-        process.env.PLAYWRIGHT_BROWSERS_PATH ||
-        (app.isPackaged ? PLAYWRIGHT_BROWSERS_DIR : undefined),
+      ...playwrightEnv,
       ...envOverrides
     },
     stdio: ["ignore", out, out]

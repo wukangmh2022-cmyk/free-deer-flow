@@ -1,4 +1,6 @@
 param(
+  [ValidateSet("full", "thin-no-browser")]
+  [string]$Variant = "full",
   [string]$TargetDir = ""
 )
 
@@ -9,10 +11,12 @@ $desktopRuntimeDir = Join-Path $repoRoot "desktop\electron\runtime\python"
 $outputDir = if ($TargetDir) { $TargetDir } else { $desktopRuntimeDir }
 $wheelhouseDir = Join-Path $repoRoot "desktop\electron\.wheelhouse"
 $playwrightBrowsersDir = Join-Path $outputDir "ms-playwright"
+$runtimeInfoPath = Join-Path $outputDir "runtime-build.json"
 
 Write-Host "Preparing DeerFlow Windows Python runtime..."
 Write-Host "Output: $outputDir"
-Write-Host "Playwright browsers: $playwrightBrowsersDir"
+Write-Host "Variant: $Variant"
+Write-Host "Playwright browsers dir: $playwrightBrowsersDir"
 
 if (-not (Get-Command python -ErrorAction SilentlyContinue)) {
   throw "python not found on PATH. Install Python on this Windows build machine first."
@@ -20,7 +24,12 @@ if (-not (Get-Command python -ErrorAction SilentlyContinue)) {
 
 New-Item -ItemType Directory -Force -Path $outputDir | Out-Null
 New-Item -ItemType Directory -Force -Path $wheelhouseDir | Out-Null
-New-Item -ItemType Directory -Force -Path $playwrightBrowsersDir | Out-Null
+
+if ($Variant -eq "full") {
+  New-Item -ItemType Directory -Force -Path $playwrightBrowsersDir | Out-Null
+} elseif (Test-Path $playwrightBrowsersDir) {
+  Remove-Item -Recurse -Force $playwrightBrowsersDir
+}
 
 $venvDir = Join-Path $outputDir "venv"
 if (-not (Test-Path $venvDir)) {
@@ -51,19 +60,62 @@ New-Item -ItemType Directory -Force -Path $backendDist | Out-Null
 & $pythonExe -m pip wheel --wheel-dir $backendDist $backendProject
 & $pythonExe -m pip install --no-index --find-links $backendDist deer-flow
 
-$env:PLAYWRIGHT_BROWSERS_PATH = $playwrightBrowsersDir
-& $pythonExe -m playwright install chromium
+function Remove-SitePackagePatterns {
+  param(
+    [string]$SitePackagesDir,
+    [string[]]$Patterns
+  )
 
-$chromiumDirs = Get-ChildItem -Path $playwrightBrowsersDir -Directory -ErrorAction SilentlyContinue |
-  Where-Object { $_.Name -like "chromium-*" }
-if (-not $chromiumDirs) {
-  throw "Playwright Chromium install failed: no chromium-* directory found under $playwrightBrowsersDir"
+  foreach ($pattern in $Patterns) {
+    Get-ChildItem -Path $SitePackagesDir -Filter $pattern -Force -ErrorAction SilentlyContinue | ForEach-Object {
+      Write-Host "Pruning site-packages entry: $($_.Name)"
+      Remove-Item -Recurse -Force $_.FullName
+    }
+  }
+}
+
+$sitePackagesDir = Join-Path $venvDir "Lib\site-packages"
+$prunedPatterns = @()
+
+if ($Variant -eq "thin-no-browser") {
+  $prunedPatterns = @(
+    "sympy*",
+    "pandas*",
+    "speech_recognition*",
+    "onnxruntime*",
+    "kubernetes*",
+    "volcengine*",
+    "youtube_transcript_api*"
+  )
+  Remove-SitePackagePatterns -SitePackagesDir $sitePackagesDir -Patterns $prunedPatterns
+} else {
+  $env:PLAYWRIGHT_BROWSERS_PATH = $playwrightBrowsersDir
+  & $pythonExe -m playwright install chromium
+
+  $chromiumDirs = Get-ChildItem -Path $playwrightBrowsersDir -Directory -ErrorAction SilentlyContinue |
+    Where-Object { $_.Name -like "chromium-*" }
+  if (-not $chromiumDirs) {
+    throw "Playwright Chromium install failed: no chromium-* directory found under $playwrightBrowsersDir"
+  }
 }
 
 Copy-Item $pythonExe (Join-Path $outputDir "python.exe") -Force
 
+$runtimeInfo = @{
+  variant = $Variant
+  generatedAt = (Get-Date).ToString("o")
+  playwrightBrowserMode = if ($Variant -eq "thin-no-browser") { "system" } else { "bundled" }
+  prunedSitePackagePatterns = $prunedPatterns
+}
+$runtimeInfo | ConvertTo-Json -Depth 4 | Set-Content -Path $runtimeInfoPath -Encoding UTF8
+
 Write-Host ""
 Write-Host "Python runtime prepared."
 Write-Host "Packaged desktop can use: $pythonExe"
-Write-Host "Bundled Playwright Chromium: $($chromiumDirs[0].FullName)"
+if ($Variant -eq "full") {
+  Write-Host "Bundled Playwright Chromium: $($chromiumDirs[0].FullName)"
+} else {
+  Write-Host "Playwright browser mode: system Chrome/Edge required at runtime"
+}
+Write-Host "Runtime metadata: $runtimeInfoPath"
 Write-Host "Next step: copy or include '$outputDir' as runtime/python in the Windows build."

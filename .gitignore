@@ -49,6 +49,8 @@ log/
 sandbox_image_cache.tar
 desktop/electron/node_modules/
 desktop/electron/dist/
+desktop/electron/.wheelhouse-mac/
+desktop/electron/runtime/python/
 
 # ignore the legacy `web` folder
 web/

@@ -5,6 +5,42 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DESKTOP_DIR="${ROOT_DIR}/desktop/electron"
 DIST_DIR="${DESKTOP_DIR}/dist"
 UNPACKED_DIR="${DIST_DIR}/win-unpacked"
+VARIANT="${WINDOWS_PORTABLE_VARIANT:-full}"
+VERSION_OVERRIDE=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --variant)
+      if [[ $# -lt 2 ]]; then
+        echo "Missing value for --variant"
+        exit 1
+      fi
+      VARIANT="$2"
+      shift 2
+      ;;
+    *)
+      if [[ -n "${VERSION_OVERRIDE}" ]]; then
+        echo "Unexpected extra argument: $1"
+        exit 1
+      fi
+      VERSION_OVERRIDE="$1"
+      shift
+      ;;
+  esac
+done
+
+case "${VARIANT}" in
+  full)
+    VARIANT_SUFFIX=""
+    ;;
+  thin-no-browser)
+    VARIANT_SUFFIX="-thin-no-browser"
+    ;;
+  *)
+    echo "Unsupported WINDOWS_PORTABLE_VARIANT: ${VARIANT}"
+    exit 1
+    ;;
+esac
 
 to_native_path() {
   local target="$1"
@@ -16,9 +52,9 @@ to_native_path() {
 }
 
 DESKTOP_PACKAGE_JSON_NATIVE="$(to_native_path "${DESKTOP_DIR}/package.json")"
-VERSION="${1:-$(DESKTOP_PACKAGE_JSON="${DESKTOP_PACKAGE_JSON_NATIVE}" node -p "require(process.env.DESKTOP_PACKAGE_JSON).version")}"
+VERSION="${VERSION_OVERRIDE:-$(DESKTOP_PACKAGE_JSON="${DESKTOP_PACKAGE_JSON_NATIVE}" node -p "require(process.env.DESKTOP_PACKAGE_JSON).version")}"
 PRODUCT_NAME="$(DESKTOP_PACKAGE_JSON="${DESKTOP_PACKAGE_JSON_NATIVE}" node -p "require(process.env.DESKTOP_PACKAGE_JSON).build.productName")"
-RELEASE_NAME="${PRODUCT_NAME}-${VERSION}-windows-x64-portable"
+RELEASE_NAME="${PRODUCT_NAME}-${VERSION}-windows-x64-portable${VARIANT_SUFFIX}"
 RELEASE_DIR="${DIST_DIR}/${RELEASE_NAME}"
 ZIP_PATH="${DIST_DIR}/${RELEASE_NAME}.zip"
 PREPARE_PYTHON_RUNTIME_SCRIPT_NATIVE="$(to_native_path "${ROOT_DIR}/scripts/prepare-windows-python-runtime.ps1")"
@@ -40,6 +76,7 @@ POWERSHELL_BIN="$(command -v pwsh || command -v powershell)"
 echo "[build-windows-release] root: ${ROOT_DIR}"
 echo "[build-windows-release] desktop: ${DESKTOP_DIR}"
 echo "[build-windows-release] version: ${VERSION}"
+echo "[build-windows-release] variant: ${VARIANT}"
 
 cd "${DESKTOP_DIR}"
 
@@ -49,7 +86,7 @@ if [ ! -d "node_modules" ]; then
 fi
 
 echo "[build-windows-release] preparing Windows Python runtime..."
-"${POWERSHELL_BIN}" -ExecutionPolicy Bypass -File "${PREPARE_PYTHON_RUNTIME_SCRIPT_NATIVE}"
+"${POWERSHELL_BIN}" -ExecutionPolicy Bypass -File "${PREPARE_PYTHON_RUNTIME_SCRIPT_NATIVE}" -Variant "${VARIANT}"
 
 echo "[build-windows-release] building portable Windows directory..."
 pnpm run dist:win
@@ -76,7 +113,15 @@ Usage:
 Notes:
 - This is a portable build. No installer is required.
 - Do not move the exe out of this folder.
+- Variant: ${VARIANT}
 EOF
+
+if [[ "${VARIANT}" == "thin-no-browser" ]]; then
+  cat >> "${RELEASE_DIR}/README-portable.txt" <<EOF
+- This build does not bundle Playwright Chromium.
+- Requires a local Microsoft Edge or Google Chrome installation for provider login/automation.
+EOF
+fi
 
 rm -f "${ZIP_PATH}"
 (

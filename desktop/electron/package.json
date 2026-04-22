@@ -8,7 +8,9 @@
     "dev": "pnpm run dev:static",
     "dev:static": "pnpm run prepare:frontend && DEER_FLOW_USE_STATIC_FRONTEND=1 electron .",
     "dist:mac": "pnpm run prepare:frontend && pnpm run prepare:mac-python && electron-builder --mac dir",
+    "dist:mac:thin": "pnpm run prepare:frontend && DEER_FLOW_MAC_PORTABLE_VARIANT=thin-no-browser pnpm run prepare:mac-python && electron-builder --mac dir -c.directories.output=dist-thin-mac",
     "dist:dmg": "pnpm run prepare:frontend && pnpm run prepare:mac-python && electron-builder --mac dmg",
+    "dist:dmg:thin": "pnpm run prepare:frontend && DEER_FLOW_MAC_PORTABLE_VARIANT=thin-no-browser pnpm run prepare:mac-python && electron-builder --mac dmg -c.directories.output=dist-thin-mac",
     "prepare:frontend": "node ./scripts/build-static-frontend.mjs",
     "prepare:mac-python": "bash ../../scripts/prepare-mac-python-runtime.sh",
     "prepare:win-python": "powershell -ExecutionPolicy Bypass -File ../../scripts/prepare-windows-python-runtime.ps1",
@@ -29,7 +31,16 @@
     "files": [
       "main.cjs",
       "static-server.cjs",
-      "scripts/build-static-frontend.mjs"
+      "scripts/build-static-frontend.mjs",
+      {
+        "from": "runtime/frontend-static",
+        "to": "runtime/frontend-static",
+        "filter": [
+          "**/*",
+          "!demo",
+          "!demo/**"
+        ]
+      }
     ],
     "extraResources": [
       {
@@ -60,15 +71,6 @@
           "!CLAUDE.md",
           "!AGENTS.md",
           "!CONTRIBUTING.md"
-        ]
-      },
-      {
-        "from": "runtime/frontend-static",
-        "to": "runtime/frontend-static",
-        "filter": [
-          "**/*",
-          "!demo",
-          "!demo/**"
         ]
       },
       {

@@ -22,7 +22,12 @@ const resolveRepoRoot = () => {
   for (const candidate of packagedCandidates) {
     if (
       fs.existsSync(path.join(candidate, "backend")) &&
-      (fs.existsSync(path.join(candidate, "scripts")) || fs.existsSync(path.join(candidate, "frontend-static")))
+      (
+        fs.existsSync(path.join(candidate, "scripts")) ||
+        fs.existsSync(path.join(candidate, "frontend-static")) ||
+        fs.existsSync(path.join(candidate, "python")) ||
+        fs.existsSync(path.join(candidate, "config.yaml"))
+      )
     ) {
       return candidate;
     }
@@ -40,7 +45,7 @@ const PORTABLE_DATA_DIR =
 const USE_STATIC_FRONTEND =
   app.isPackaged || process.env.DEER_FLOW_USE_STATIC_FRONTEND === "1";
 const FRONTEND_STATIC_DIR = app.isPackaged
-  ? path.join(REPO_ROOT, "frontend-static")
+  ? path.join(process.resourcesPath, "app.asar", "runtime", "frontend-static")
   : path.join(REPO_ROOT, "desktop", "electron", "runtime", "frontend-static");
 const STATIC_SERVER_ENTRY = app.isPackaged
   ? path.join(process.resourcesPath, "app.asar", "static-server.cjs")

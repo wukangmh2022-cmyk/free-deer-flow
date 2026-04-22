@@ -99,8 +99,6 @@ if ($Variant -eq "thin-no-browser") {
   }
 }
 
-Copy-Item $pythonExe (Join-Path $outputDir "python.exe") -Force
-
 $runtimeInfo = @{
   variant = $Variant
   generatedAt = (Get-Date).ToString("o")

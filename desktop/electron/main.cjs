@@ -50,9 +50,9 @@ const PLAYWRIGHT_BROWSERS_DIR = path.join(RUNTIME_PYTHON_DIR, "ms-playwright");
 const RUNTIME_BUILD_INFO_PATH = path.join(RUNTIME_PYTHON_DIR, "runtime-build.json");
 const RUNTIME_PYTHON_EXE_CANDIDATES = IS_WINDOWS
   ? [
-      path.join(RUNTIME_PYTHON_DIR, "python.exe"),
       path.join(RUNTIME_PYTHON_DIR, "venv", "Scripts", "python.exe"),
-      path.join(RUNTIME_PYTHON_DIR, "Scripts", "python.exe")
+      path.join(RUNTIME_PYTHON_DIR, "Scripts", "python.exe"),
+      path.join(RUNTIME_PYTHON_DIR, "python.exe")
     ]
   : [
       path.join(RUNTIME_PYTHON_DIR, "bin", "python3"),

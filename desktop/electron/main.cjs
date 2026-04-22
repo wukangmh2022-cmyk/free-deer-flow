@@ -46,6 +46,7 @@ const STATIC_SERVER_ENTRY = app.isPackaged
   ? path.join(process.resourcesPath, "app.asar", "static-server.cjs")
   : path.join(REPO_ROOT, "desktop", "electron", "static-server.cjs");
 const RUNTIME_PYTHON_DIR = path.join(REPO_ROOT, "python");
+const RUNTIME_WINDOWS_EXE = IS_WINDOWS ? path.join(RUNTIME_PYTHON_DIR, "deerflow-runtime.exe") : null;
 const PLAYWRIGHT_BROWSERS_DIR = path.join(RUNTIME_PYTHON_DIR, "ms-playwright");
 const RUNTIME_BUILD_INFO_PATH = path.join(RUNTIME_PYTHON_DIR, "runtime-build.json");
 const RUNTIME_PYTHON_EXE_CANDIDATES = IS_WINDOWS
@@ -161,6 +162,11 @@ const commandExists = (command) => {
 
 const getBundledPythonPath = () =>
   RUNTIME_PYTHON_EXE_CANDIDATES.find((candidate) => fs.existsSync(candidate));
+
+const getBundledWindowsRuntimeExe = () =>
+  IS_WINDOWS && app.isPackaged && RUNTIME_WINDOWS_EXE && fs.existsSync(RUNTIME_WINDOWS_EXE)
+    ? RUNTIME_WINDOWS_EXE
+    : null;
 
 const hasBundledPython = () => app.isPackaged && Boolean(getBundledPythonPath());
 
@@ -324,7 +330,7 @@ const collectStartupProblems = () => {
     }
   }
 
-  if (!resolvePythonRuntime()) {
+  if (!getBundledWindowsRuntimeExe() && !resolvePythonRuntime()) {
     problems.push(
       `no Python runtime found: expected bundled runtime at one of ${RUNTIME_PYTHON_EXE_CANDIDATES.join(", ")} or one of uv/python3/python on PATH`
     );
@@ -400,7 +406,8 @@ const spawnLogged = (command, args, cwd, logName, envOverrides = {}) => {
       ...playwrightEnv,
       ...envOverrides
     },
-    stdio: ["ignore", out, out]
+    stdio: ["ignore", out, out],
+    windowsHide: true
   });
   child.on("error", () => {});
   return child;
@@ -578,46 +585,69 @@ const spawnStaticFrontendServer = () => {
 
 const startStaticDesktopServices = async () => {
   const configPath = fs.existsSync(RUNTIME_CONFIG_PATH) ? RUNTIME_CONFIG_PATH : FALLBACK_CONFIG_PATH;
+  const windowsRuntimeExe = getBundledWindowsRuntimeExe();
   const pythonRuntime = resolvePythonRuntime();
-  if (!pythonRuntime) {
+  if (!windowsRuntimeExe && !pythonRuntime) {
     throw new Error("No Python runtime available for desktop services.");
   }
   const extensionsConfigPath = ensureDesktopExtensionsConfig();
   logLine(`start static desktop services config=${configPath}`);
   logLine(`extensions config=${extensionsConfigPath}`);
-  logLine(`python runtime=${pythonRuntime.kind}`);
+  if (windowsRuntimeExe) {
+    logLine(`desktop runtime=windows-exe path=${windowsRuntimeExe}`);
+    providerProc = spawnLogged(
+      windowsRuntimeExe,
+      ["provider"],
+      BACKEND_DIR,
+      "electron_provider.log",
+      { DEER_FLOW_CONFIG_PATH: configPath }
+    );
 
-  providerProc = spawnLogged(
-    pythonRuntime.command,
-    pythonModuleArgs(pythonRuntime, "uvicorn", [
-      "app.deepseek_local_provider:app",
-      "--host",
-      PROVIDER_HOST,
-      "--port",
-      String(PROVIDER_PORT)
-    ]),
-    BACKEND_DIR,
-    "electron_provider.log",
-    { DEER_FLOW_CONFIG_PATH: configPath }
-  );
+    gatewayProc = spawnLogged(
+      windowsRuntimeExe,
+      ["gateway"],
+      BACKEND_DIR,
+      "electron_gateway.log",
+      {
+        PYTHONPATH: ".",
+        SKIP_LANGGRAPH_SERVER: "1",
+        DEER_FLOW_CONFIG_PATH: configPath,
+      }
+    );
+  } else {
+    logLine(`python runtime=${pythonRuntime.kind}`);
+    providerProc = spawnLogged(
+      pythonRuntime.command,
+      pythonModuleArgs(pythonRuntime, "uvicorn", [
+        "app.deepseek_local_provider:app",
+        "--host",
+        PROVIDER_HOST,
+        "--port",
+        String(PROVIDER_PORT)
+      ]),
+      BACKEND_DIR,
+      "electron_provider.log",
+      { DEER_FLOW_CONFIG_PATH: configPath }
+    );
 
-  gatewayProc = spawnLogged(
-    pythonRuntime.command,
-    pythonModuleArgs(pythonRuntime, "uvicorn", [
-      "app.gateway.app:app",
-      "--host",
-      "127.0.0.1",
-      "--port",
-      String(GATEWAY_PORT)
-    ]),
-    BACKEND_DIR,
-    "electron_gateway.log",
-    {
-      PYTHONPATH: ".",
-      SKIP_LANGGRAPH_SERVER: "1",
-      DEER_FLOW_CONFIG_PATH: configPath,
-    }
-  );
+    gatewayProc = spawnLogged(
+      pythonRuntime.command,
+      pythonModuleArgs(pythonRuntime, "uvicorn", [
+        "app.gateway.app:app",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        String(GATEWAY_PORT)
+      ]),
+      BACKEND_DIR,
+      "electron_gateway.log",
+      {
+        PYTHONPATH: ".",
+        SKIP_LANGGRAPH_SERVER: "1",
+        DEER_FLOW_CONFIG_PATH: configPath,
+      }
+    );
+  }
 
   frontendProc = spawnStaticFrontendServer();
 
